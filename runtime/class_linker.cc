@@ -61,6 +61,7 @@
 #include "mirror/reference-inl.h"
 #include "mirror/stack_trace_element.h"
 #include "mirror/string-inl.h"
+#include "mini_trace.h"
 #include "os.h"
 #include "runtime.h"
 #include "entrypoints/entrypoint_utils.h"
@@ -2315,6 +2316,9 @@ mirror::Class* ClassLinker::DefineClass(Thread* self, const char* descriptor, si
    * at this point.
    */
   Dbg::PostClassPrepare(new_class_h.Get());
+
+  MiniTrace::PostClassPrepare(new_class_h.Get());
+  Fuzzing::PostClassPrepare(new_class_h.Get());
 
   return new_class_h.Get();
 }

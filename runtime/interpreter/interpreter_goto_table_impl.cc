@@ -15,6 +15,7 @@
  */
 
 #include "interpreter_common.h"
+#include "mini_trace.h"
 
 namespace art {
 namespace interpreter {
@@ -36,6 +37,9 @@ namespace interpreter {
     dex_pc = static_cast<uint32_t>(static_cast<int32_t>(dex_pc) + disp);    \
     shadow_frame.SetDexPC(dex_pc);                                          \
     TraceExecution(shadow_frame, inst, dex_pc, mh);                         \
+    if (UNLIKELY(execution_data != NULL)) {                                 \
+      execution_data[dex_pc] = true;                                        \
+    }                                                                       \
     inst_data = inst->Fetch16(0);                                           \
     goto *currentHandlersTable[inst->Opcode(inst_data)];                    \
   } while (false)
@@ -146,6 +150,7 @@ JValue ExecuteGotoImpl(Thread* self, MethodHelper& mh, const DexFile::CodeItem* 
   uint16_t inst_data;
   const void* const* currentHandlersTable;
   bool notified_method_entry_event = false;
+  bool* execution_data = NULL;
   UPDATE_HANDLER_TABLE();
   if (LIKELY(dex_pc == 0)) {  // We are entering the method as opposed to deoptimizing.
     if (kIsDebugBuild) {
@@ -157,6 +162,7 @@ JValue ExecuteGotoImpl(Thread* self, MethodHelper& mh, const DexFile::CodeItem* 
                                         shadow_frame.GetMethod(), 0);
       notified_method_entry_event = true;
     }
+    execution_data = MiniTrace::GetExecutionData(self, shadow_frame.GetMethod());
   }
 
   // Jump to first instruction.

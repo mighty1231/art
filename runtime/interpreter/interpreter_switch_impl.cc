@@ -15,6 +15,7 @@
  */
 
 #include "interpreter_common.h"
+#include "mini_trace.h"
 
 namespace art {
 namespace interpreter {
@@ -70,6 +71,7 @@ JValue ExecuteSwitchImpl(Thread* self, MethodHelper& mh, const DexFile::CodeItem
   uint32_t dex_pc = shadow_frame.GetDexPC();
   bool notified_method_entry_event = false;
   const instrumentation::Instrumentation* const instrumentation = Runtime::Current()->GetInstrumentation();
+  bool* execution_data = NULL;
   if (LIKELY(dex_pc == 0)) {  // We are entering the method as opposed to deoptimizing.
     if (kIsDebugBuild) {
         self->AssertNoPendingException();
@@ -79,12 +81,16 @@ JValue ExecuteSwitchImpl(Thread* self, MethodHelper& mh, const DexFile::CodeItem
                                         shadow_frame.GetMethod(), 0);
       notified_method_entry_event = true;
     }
+    execution_data = MiniTrace::GetExecutionData(self, shadow_frame.GetMethod());
   }
   const uint16_t* const insns = code_item->insns_;
   const Instruction* inst = Instruction::At(insns + dex_pc);
   uint16_t inst_data;
   while (true) {
     dex_pc = inst->GetDexPc(insns);
+    if (execution_data != NULL) {
+      execution_data[dex_pc] = true;
+    }
     shadow_frame.SetDexPC(dex_pc);
     TraceExecution(shadow_frame, inst, dex_pc, mh);
     inst_data = inst->Fetch16(0);

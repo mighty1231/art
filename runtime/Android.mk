@@ -148,6 +148,7 @@ LIBART_COMMON_SRC_FILES := \
   thread_pool.cc \
   throw_location.cc \
   trace.cc \
+  mini_trace.cc \
   transaction.cc \
   profiler.cc \
   fault_handler.cc \
