@@ -162,6 +162,20 @@ class MANAGED ArtMethod FINAL : public Object {
     SetAccessFlags(GetAccessFlags() & ~kAccPortableCompiled);
   }
 
+  bool IsMiniTraceable() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return (GetAccessFlags() & kAccIsMiniTraceable) != 0;
+  }
+
+  void SetIsMiniTraceable() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    DCHECK(!IsMiniTraceable());
+    SetAccessFlags(GetAccessFlags() | kAccIsMiniTraceable);
+  }
+
+  void ClearIsMiniTraceable() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    DCHECK(IsMiniTraceable());
+    SetAccessFlags(GetAccessFlags() & ~kAccIsMiniTraceable);
+  }
+
   bool CheckIncompatibleClassChange(InvokeType type) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   uint16_t GetMethodIndex() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);

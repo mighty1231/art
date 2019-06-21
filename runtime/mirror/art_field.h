@@ -62,6 +62,20 @@ class MANAGED ArtField FINAL : public Object {
     SetField32<false>(OFFSET_OF_OBJECT_MEMBER(ArtField, access_flags_), new_access_flags);
   }
 
+  bool IsMiniTraceable() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return (GetAccessFlags() & kAccIsMiniTraceable) != 0;
+  }
+
+  void SetIsMiniTraceable() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    DCHECK(!IsMiniTraceable());
+    SetAccessFlags(GetAccessFlags() | kAccIsMiniTraceable);
+  }
+
+  void ClearIsMiniTraceable() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    DCHECK(IsMiniTraceable());
+    SetAccessFlags(GetAccessFlags() & ~kAccIsMiniTraceable);
+  }
+
   bool IsPublic() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     return (GetAccessFlags() & kAccPublic) != 0;
   }

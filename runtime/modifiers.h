@@ -52,6 +52,9 @@ static constexpr uint32_t kAccMiranda =              0x00200000;  // method (dex
 // Special runtime-only flags.
 // Note: if only kAccClassIsReference is set, we have a soft reference.
 
+// A class, method or field is mini-traceable
+static constexpr uint32_t kAccIsMiniTraceable           = 0x40000000;
+
 // class/ancestor overrides finalize()
 static constexpr uint32_t kAccClassIsFinalizable        = 0x80000000;
 // class is a soft/weak/phantom ref

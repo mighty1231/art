@@ -853,6 +853,21 @@ class Thread {
     return tlsPtr_.nested_signal_state;
   }
 
+  void BeginMethodTraceEvent() {
+    if (tls32_.handling_method_trace_) {
+      LOG(FATAL) << "A method trace event is generated via handling a method trace event.";
+    }
+    tls32_.handling_method_trace_ = true;
+  }
+
+  void EndMethodTraceEvent() {
+    tls32_.handling_method_trace_ = false;
+  }
+
+  bool HandlingMethodTraceEvent() {
+    return tls32_.handling_method_trace_;
+  }
+
  private:
   explicit Thread(bool daemon);
   ~Thread() LOCKS_EXCLUDED(Locks::mutator_lock_,
@@ -958,7 +973,7 @@ class Thread {
       suspend_count(0), debug_suspend_count(0), thin_lock_thread_id(0), tid(0),
       daemon(is_daemon), throwing_OutOfMemoryError(false), no_thread_suspension(0),
       thread_exit_check_count(0), is_exception_reported_to_instrumentation_(false),
-      handling_signal_(false), padding_(0) {
+      handling_signal_(false), handling_method_trace_(false) {
     }
 
     union StateAndFlags state_and_flags;
@@ -1002,8 +1017,11 @@ class Thread {
     // True if signal is being handled by this thread.
     bool32_t handling_signal_;
 
+    // True if this thread is handling method trace events.
+    bool32_t handling_method_trace_;
+
     // Padding to make the size aligned to 8.  Remove this if we add another 32 bit field.
-    int32_t padding_;
+    // int32_t padding_;
   } tls32_;
 
   struct PACKED(8) tls_64bit_sized_values {

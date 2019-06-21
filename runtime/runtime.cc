@@ -79,6 +79,7 @@
 #include "thread.h"
 #include "thread_list.h"
 #include "trace.h"
+#include "mini_trace.h"
 #include "transaction.h"
 #include "profiler.h"
 #include "verifier/method_verifier.h"
@@ -177,6 +178,8 @@ Runtime::~Runtime() {
   }
 
   Trace::Shutdown();
+  MiniTrace::Shutdown();
+  Fuzzing::Shutdown();
 
   // Make sure to let the GC complete if it is running.
   heap_->WaitForGcToComplete(gc::kGcCauseBackground, self);
@@ -548,6 +551,8 @@ void Runtime::DidForkFromZygote(JNIEnv* env, NativeBridgeAction action, const ch
 
   StartSignalCatcher();
 
+  StartMiniTrace();
+
   // Start the JDWP thread. If the command-line debugger flags specified "suspend=y",
   // this will pause the runtime, so we probably want this to come last.
   Dbg::StartJdwp();
@@ -557,6 +562,15 @@ void Runtime::StartSignalCatcher() {
   if (!is_zygote_) {
     signal_catcher_ = new SignalCatcher(stack_trace_file_);
   }
+}
+
+void Runtime::StartMiniTrace() {
+  if (is_zygote_) {
+    return;
+  }
+
+  MiniTrace::Start(false);
+  Fuzzing::Start();
 }
 
 bool Runtime::IsShuttingDown(Thread* self) {
@@ -1090,6 +1104,7 @@ void Runtime::BlockSignals() {
   signals.Add(SIGQUIT);
   // SIGUSR1 is used to initiate a GC.
   signals.Add(SIGUSR1);
+  signals.Add(SIGUSR2);
   signals.Block();
 }
 

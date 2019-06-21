@@ -33,6 +33,7 @@
 #include "runtime.h"
 #include "scoped_thread_state_change.h"
 #include "signal_set.h"
+#include "mini_trace.h"
 #include "thread.h"
 #include "thread_list.h"
 #include "utils.h"
@@ -171,6 +172,11 @@ void SignalCatcher::HandleSigUsr1() {
   Runtime::Current()->GetHeap()->CollectGarbage(false);
 }
 
+void SignalCatcher::HandleSigUsr2() {
+  MiniTrace::Toggle();
+  Fuzzing::Toggle();
+}
+
 int SignalCatcher::WaitForSignal(Thread* self, SignalSet& signals) {
   ScopedThreadStateChange tsc(self, kWaitingInMainSignalCatcherLoop);
 
@@ -211,6 +217,7 @@ void* SignalCatcher::Run(void* arg) {
   SignalSet signals;
   signals.Add(SIGQUIT);
   signals.Add(SIGUSR1);
+  signals.Add(SIGUSR2);
 
   while (true) {
     int signal_number = signal_catcher->WaitForSignal(self, signals);
@@ -225,6 +232,9 @@ void* SignalCatcher::Run(void* arg) {
       break;
     case SIGUSR1:
       signal_catcher->HandleSigUsr1();
+      break;
+    case SIGUSR2:
+      signal_catcher->HandleSigUsr2();
       break;
     default:
       LOG(ERROR) << "Unexpected signal %d" << signal_number;

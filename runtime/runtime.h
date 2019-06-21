@@ -508,6 +508,7 @@ class Runtime {
 
   void StartDaemonThreads();
   void StartSignalCatcher();
+  void StartMiniTrace();
 
   // A pointer to the active runtime or NULL.
   static Runtime* instance_;

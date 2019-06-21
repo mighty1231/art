@@ -35,6 +35,7 @@
 #include "scoped_thread_state_change.h"
 #include "thread.h"
 #include "trace.h"
+#include "mini_trace.h"
 #include "utils.h"
 #include "well_known_classes.h"
 
@@ -892,6 +893,7 @@ void ThreadList::Unregister(Thread* self) {
 
   // If tracing, remember thread id and name before thread exits.
   Trace::StoreExitingThreadInfo(self);
+  MiniTrace::StoreExitingThreadInfo(self);
 
   uint32_t thin_lock_id = self->GetThreadId();
   while (self != nullptr) {
