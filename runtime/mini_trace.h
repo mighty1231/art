@@ -45,7 +45,6 @@ namespace mirror {
 class Thread;
 
 class MiniTrace : public instrumentation::InstrumentationListener {
-
   enum MiniTraceFlag {
     kDoMethodEntered =    1 << 0,
     kDoMethodExited =     1 << 1,
@@ -61,7 +60,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   };
 
  public:
-  static void Start(bool force_start=false)
+  static void Start(bool force_start = false)
       LOCKS_EXCLUDED(Locks::mutator_lock_,
                      Locks::thread_list_lock_,
                      Locks::thread_suspend_count_lock_,
@@ -196,9 +195,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 };
 
 class MethodAction {
-
-public:
-  MethodAction(std::string data);
+ public:
+  explicit MethodAction(std::string data);
   ~MethodAction();
 
   // One sleep action and all exception actions
@@ -209,7 +207,7 @@ public:
   bool PerformAction(Thread* thread, int count)
        SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  long GetSleepTime() {
+  uint64_t GetSleepTime() {
     return sleep_time_;
   }
 
@@ -229,7 +227,7 @@ public:
     return data_;
   }
 
-private:
+ private:
   void Parse(char* data);
 
   StringPiece declaring_class_;
@@ -239,15 +237,13 @@ private:
   std::vector<int>         exception_flags_;
   std::vector<StringPiece> exceptions_;
 
-  long sleep_time_;
+  uint64_t sleep_time_;
 
   char* data_;
-
 };
 
 class Fuzzing : public instrumentation::InstrumentationListener {
-public:
-
+ public:
   static void Start()
       LOCKS_EXCLUDED(Locks::mutator_lock_,
                      Locks::thread_list_lock_,
@@ -298,8 +294,7 @@ public:
 
   void FinishFuzzing() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-private:
-
+ private:
   void PerformMethodAction(Thread* thread, mirror::ArtMethod* method, bool is_entry)
                        LOCKS_EXCLUDED(Locks::trace_lock_)
                        SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
