@@ -174,7 +174,6 @@ void SignalCatcher::HandleSigUsr1() {
 
 void SignalCatcher::HandleSigUsr2() {
   MiniTrace::Toggle();
-  Fuzzing::Toggle();
 }
 
 int SignalCatcher::WaitForSignal(Thread* self, SignalSet& signals) {

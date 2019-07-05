@@ -189,8 +189,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   // Method Execution Data
   SafeMap<mirror::ArtMethod*, bool*> execution_data_;
 
-  // Fuzzing
-
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
 };
 
@@ -240,79 +238,6 @@ class MethodAction {
   uint64_t sleep_time_;
 
   char* data_;
-};
-
-class Fuzzing : public instrumentation::InstrumentationListener {
- public:
-  static void Start()
-      LOCKS_EXCLUDED(Locks::mutator_lock_,
-                     Locks::thread_list_lock_,
-                     Locks::thread_suspend_count_lock_,
-                     Locks::trace_lock_);
-  static void Stop()
-      LOCKS_EXCLUDED(Locks::mutator_lock_,
-                     Locks::thread_list_lock_,
-                     Locks::trace_lock_);
-
-  static void Shutdown() LOCKS_EXCLUDED(Locks::trace_lock_);
-
-  static void Toggle() LOCKS_EXCLUDED(Locks::trace_lock_);
-
-  explicit Fuzzing(const char* config_file_name);
-  ~Fuzzing();
-
-  void MethodEntered(Thread* thread, mirror::Object* this_object,
-                     mirror::ArtMethod* method, uint32_t dex_pc)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) OVERRIDE;
-  void MethodExited(Thread* thread, mirror::Object* this_object,
-                    mirror::ArtMethod* method, uint32_t dex_pc,
-                    const JValue& return_value)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) OVERRIDE;
-  void MethodUnwind(Thread* thread, mirror::Object* this_object,
-                    mirror::ArtMethod* method, uint32_t dex_pc)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) OVERRIDE;
-  void DexPcMoved(Thread* thread, mirror::Object* this_object,
-                  mirror::ArtMethod* method, uint32_t new_dex_pc)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) OVERRIDE;
-  void FieldRead(Thread* thread, mirror::Object* this_object,
-                 mirror::ArtMethod* method, uint32_t dex_pc, mirror::ArtField* field)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) OVERRIDE;
-  void FieldWritten(Thread* thread, mirror::Object* this_object,
-                    mirror::ArtMethod* method, uint32_t dex_pc, mirror::ArtField* field,
-                    const JValue& field_value)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) OVERRIDE;
-  void ExceptionCaught(Thread* thread, const ThrowLocation& throw_location,
-                       mirror::ArtMethod* catch_method, uint32_t catch_dex_pc,
-                       mirror::Throwable* exception_object)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) OVERRIDE;
-
-  void ResolveMethodActions(mirror::Class* klass)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  static void PostClassPrepare(mirror::Class* klass)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  void FinishFuzzing() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
- private:
-  void PerformMethodAction(Thread* thread, mirror::ArtMethod* method, bool is_entry)
-                       LOCKS_EXCLUDED(Locks::trace_lock_)
-                       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  void AddMethodAction(std::string data);
-
-  static Fuzzing* volatile the_fuzzing_ GUARDED_BY(Locks::trace_lock_);
-
-  int current_point_;
-  // parsed from configuration file
-  std::queue<int> action_points_;
-  int verbose_;
-  std::unordered_map<std::string, std::vector<MethodAction*>> class_to_method_actions_;
-
-  // resolved during post class prepare
-  std::unordered_map<mirror::ArtMethod*, MethodAction*> resolved_method_actions_ GUARDED_BY(Locks::mutator_lock_);
-
-  DISALLOW_COPY_AND_ASSIGN(Fuzzing);
 };
 
 }  // namespace art

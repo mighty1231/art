@@ -179,7 +179,6 @@ Runtime::~Runtime() {
 
   Trace::Shutdown();
   MiniTrace::Shutdown();
-  Fuzzing::Shutdown();
 
   // Make sure to let the GC complete if it is running.
   heap_->WaitForGcToComplete(gc::kGcCauseBackground, self);
@@ -570,7 +569,6 @@ void Runtime::StartMiniTrace() {
   }
 
   MiniTrace::Start(false);
-  Fuzzing::Start();
 }
 
 bool Runtime::IsShuttingDown(Thread* self) {

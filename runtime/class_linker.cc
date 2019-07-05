@@ -2318,7 +2318,6 @@ mirror::Class* ClassLinker::DefineClass(Thread* self, const char* descriptor, si
   Dbg::PostClassPrepare(new_class_h.Get());
 
   MiniTrace::PostClassPrepare(new_class_h.Get());
-  Fuzzing::PostClassPrepare(new_class_h.Get());
 
   return new_class_h.Get();
 }
