@@ -147,10 +147,10 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   // Singleton instance of the Trace or NULL when no method tracing is active.
   static MiniTrace* volatile the_trace_ GUARDED_BY(Locks::trace_lock_);
 
-  // File to write method info and field info out to.
+  // File for log trace infoandroi
   std::unique_ptr<File> trace_info_file_;
 
-  // File to write trace data out to.
+  // File for log trace data
   std::unique_ptr<File> trace_data_file_;
 
   // Buffer to store trace data.

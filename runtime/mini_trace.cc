@@ -39,6 +39,7 @@
 #include "ScopedLocalRef.h"
 #include "thread.h"
 #include "thread_list.h"
+#include "private/android_filesystem_config.h"
 #if !defined(ART_USE_PORTABLE_COMPILER)
 #include "entrypoints/quick/quick_entrypoints.h"
 #endif
@@ -134,131 +135,71 @@ static void Append4LE(uint8_t* buf, uint32_t val) {
   *buf++ = static_cast<uint8_t>(val >> 24);
 }
 
-bool SDCARDEnabled() {
-  const gid_t SDCARD_RW = 1015;  // See system/core/include/private/android_filesystem_config.h
-  int size = getgroups(0, NULL);
-
-  if (size == -1) {
-    LOG(ERROR) << "MiniTrace: getgroups failed: " << strerror(errno);
-    return false;
-  }
-
-  std::unique_ptr<gid_t[]> gids;
-  gids.reset(new gid_t[size]);
-
-  size = getgroups(size, gids.get());
-  if (size == -1) {
-    LOG(ERROR) << "MiniTrace: getgroups failed: " << strerror(errno);
-    return false;
-  }
-
-  for (int i = 0; i < size; i++) {
-    if (gids[i] == SDCARD_RW) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
 void MiniTrace::Start(bool force_start) {
+  int uid = getuid();
+  if ((uid % AID_USER) < AID_APP) {
+    // Do not target system app
+    return;
+  }
+
   Thread* self = Thread::Current();
   {
     MutexLock mu(self, *Locks::trace_lock_);
     if (the_trace_ != NULL) {
-      LOG(ERROR) << "Trace already in progress, ignoring this request";
+      LOG(ERROR) << "MiniTrace: Trace already in progress, ignoring this request";
       return;
     }
   }
 
-  const char* trace_base_filename = "/data/mini_trace_";
-  bool sdcard_enabeld = SDCARDEnabled();
-  if (sdcard_enabeld) {
-    trace_base_filename = "/sdcard/mini_trace_";
+  // Fetch package name
+  // File *proc = OS::OpenFileForReading("/proc/self/cmdline");
+  char tmp[100];
+  sprintf(tmp, "/proc/%d/cmdline", getpid());
+  File *proc = OS::OpenFileForReading(tmp);
+  char buf[64];
+  if (proc == NULL) {
+    PLOG(ERROR) << "MiniTrace: read /proc/self/cmdline failed";
+    return;
+  } else {
+    int64_t read = proc->Read(buf, 64, 0);
+    if (read >= 0) {
+      LOG(INFO) << "MiniTrace: /proc/self/cmdline success " << read << " buf=" << buf;
+    } else {
+      PLOG(ERROR) << "MiniTrace: /proc/self/cmdline failed";
+      return;
+    }
+    if (proc->Close() != 0) {
+      PLOG(ERROR) << "MiniTrace: /proc/self/cmdline cannot be closed";
+    }
   }
+
+  if (memcmp(buf, "zygote", 6) == 0) {
+    LOG(INFO) << "Zygote process! with uid " << uid;
+    return;
+  }
+
+  // remove another argument if exist.
+  char *pointer = strchr(buf, ' ');
+  std::string trace_directory;
+  if (pointer != nullptr) {
+    *pointer = 0;
+    trace_directory.assign("/data/data/");
+    trace_directory.append(buf);
+    trace_directory.append(1, '/');
+  } else {
+    trace_directory.assign("/data/data/");
+    trace_directory.append(buf);
+    trace_directory.append(1, '/');
+  }
+
 
   uint32_t events = 0;
   int buffer_size = 1 * 1024 * 1024;
-  {
-    std::ostringstream os;
-    os << trace_base_filename << getuid()  << "_config.in";
-    std::string trace_config_filename(os.str());
-
-    if (OS::FileExists(trace_config_filename.c_str())) {
-      std::ifstream in(trace_config_filename.c_str());
-      if (!in) {
-        LOG(INFO) << "MiniTrace: config file " << trace_config_filename << " exists but can't be opened";
-        return;
-      }
-      // The first line contains on or off.
-      std::string line;
-
-      while (!in.eof()) {
-        std::getline(in, line);
-        if (in.eof()) {
-          break;
-        }
-        if (line.compare("off") == 0) {
-          LOG(INFO) << "MiniTrace has been turned off in the config file " << trace_config_filename;
-          return;
-        } else if (line.compare("DoCoverage") == 0) {
-          LOG(INFO) << "MiniTrace: enable DoCoverage in file " << trace_config_filename;
-          events |= kDoCoverage;
-        } else if (line.compare("DoFilter") == 0) {
-          LOG(INFO) << "MiniTrace: enable DoFilter in file " << trace_config_filename;
-          events |= kDoFilter;
-        } else if (line.compare("MethodEvent") == 0) {
-          LOG(INFO) << "MiniTrace: enable MethodEvent in file " << trace_config_filename;
-          events |= kDoMethodEntered | kDoMethodExited | kDoMethodUnwind;
-        } else if (line.compare("FieldEvent") == 0) {
-          LOG(INFO) << "MiniTrace: enable FieldEvent in file " << trace_config_filename;
-          events |= kDoFieldRead | kDoFieldWritten;
-        } else if (line.compare("MonitorEvent") == 0) {
-          LOG(INFO) << "MiniTrace: enable MonitorEvent in file " << trace_config_filename;
-          events |= kDoMonitorEntered | kDoMonitorExited;
-        } else {
-          LOG(INFO) << "MiniTrace: ignore unknown option " << line << " in file " << trace_config_filename;
-        }
-      }
-      LOG(INFO) << StringPrintf("MiniTrace: final events: 0x%08x", events);
-    } else if (!force_start) {
-      LOG(INFO) << "MiniTrace: config file " << trace_config_filename << " does not exist";
-      return;
-    }
-  }
-
-  // test for OS R/W
-  File* file = OS::OpenFileForReading("/data/rwtest.txt");
-  if (file == NULL) {
-    LOG(INFO) << "MiniTrace: R/W test failed";
-
-    File* file2 = OS::CreateEmptyFile("/data/rwtest.txt");
-    if (file2 == NULL) {
-      LOG(INFO) << "MiniTrace: Create File Failed";
-    } else {
-      LOG(INFO) << "MiniTrace: Create File Success";
-      if (file2->Close() != 0) {
-        PLOG(ERROR) << "MiniTrace: Create File Close Failed";
-      }
-    }
-  } else {
-    char buf[100];
-    int64_t read = file->Read(buf, 99, 0);
-    if (read) {
-      LOG(INFO) << "MiniTrace: R/W test success, ret=" << read << ", content=" << buf;
-    }else {
-      LOG(INFO) << "MiniTrace: R/W test success";
-    }
-
-    if (file->Close() != 0) {
-      PLOG(ERROR) << "MiniTrace: R/W test cannot be closed";
-    }
-  }
 
   std::unique_ptr<File> trace_info_file;
   {
     std::ostringstream os;
-    os << trace_base_filename << getuid()  << "_info.log";
+    os << trace_directory << "mt_info.log";
     std::string trace_info_filename(os.str());
     trace_info_file.reset(OS::CreateEmptyFile(trace_info_filename.c_str()));
     if (trace_info_file.get() == NULL) {
@@ -270,7 +211,7 @@ void MiniTrace::Start(bool force_start) {
   std::unique_ptr<File> trace_data_file;
   {
     std::ostringstream os;
-    os << trace_base_filename << getuid()  << "_data.bin";
+    os << trace_directory << "mt_data.bin";
     std::string trace_data_filename(os.str());
     trace_data_file.reset(OS::CreateEmptyFile(trace_data_filename.c_str()));
     if (trace_data_file.get() == NULL) {
