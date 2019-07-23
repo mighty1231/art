@@ -147,7 +147,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   // Singleton instance of the Trace or NULL when no method tracing is active.
   static MiniTrace* volatile the_trace_ GUARDED_BY(Locks::trace_lock_);
 
-  // File for log trace infoandroi
+  // File for log trace info
   std::unique_ptr<File> trace_info_file_;
 
   // File for log trace data
@@ -190,54 +190,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   SafeMap<mirror::ArtMethod*, bool*> execution_data_;
 
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
-};
-
-class MethodAction {
- public:
-  explicit MethodAction(std::string data);
-  ~MethodAction();
-
-  // One sleep action and all exception actions
-  int GetActionCount() {
-    return exceptions_.size() + 1;
-  }
-
-  bool PerformAction(Thread* thread, int count)
-       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  uint64_t GetSleepTime() {
-    return sleep_time_;
-  }
-
-  StringPiece& GetClass() {
-    return declaring_class_;
-  }
-
-  StringPiece& GetName() {
-    return name_;
-  }
-
-  StringPiece& GetSignature() {
-    return signature_;
-  }
-
-  char* GetData() {
-    return data_;
-  }
-
- private:
-  void Parse(char* data);
-
-  StringPiece declaring_class_;
-  StringPiece name_;
-  StringPiece signature_;
-
-  std::vector<int>         exception_flags_;
-  std::vector<StringPiece> exceptions_;
-
-  uint64_t sleep_time_;
-
-  char* data_;
 };
 
 }  // namespace art

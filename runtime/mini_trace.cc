@@ -185,11 +185,9 @@ void MiniTrace::Start(bool force_start) {
     *pointer = 0;
     trace_directory.assign("/data/data/");
     trace_directory.append(buf);
-    trace_directory.append(1, '/');
   } else {
     trace_directory.assign("/data/data/");
     trace_directory.append(buf);
-    trace_directory.append(1, '/');
   }
 
 
@@ -199,7 +197,7 @@ void MiniTrace::Start(bool force_start) {
   std::unique_ptr<File> trace_info_file;
   {
     std::ostringstream os;
-    os << trace_directory << "mt_info.log";
+    os << trace_directory << "/mt_info.log";
     std::string trace_info_filename(os.str());
     trace_info_file.reset(OS::CreateEmptyFile(trace_info_filename.c_str()));
     if (trace_info_file.get() == NULL) {
@@ -211,7 +209,7 @@ void MiniTrace::Start(bool force_start) {
   std::unique_ptr<File> trace_data_file;
   {
     std::ostringstream os;
-    os << trace_directory << "mt_data.bin";
+    os << trace_directory << "/mt_data.bin";
     std::string trace_data_filename(os.str());
     trace_data_file.reset(OS::CreateEmptyFile(trace_data_filename.c_str()));
     if (trace_data_file.get() == NULL) {
