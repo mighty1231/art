@@ -44,6 +44,9 @@
 #include "entrypoints/quick/quick_entrypoints.h"
 #endif
 
+#include <sys/socket.h>
+#include <sys/un.h>
+
 namespace art {
 
 enum MiniTraceAction {
@@ -135,6 +138,47 @@ static void Append4LE(uint8_t* buf, uint32_t val) {
   *buf++ = static_cast<uint8_t>(val >> 24);
 }
 
+static bool CreateSocketAndSendUID(char *buf, int uid) {
+  int socket_fd;
+  sockaddr_un server_addr;
+  if ((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
+    PLOG(ERROR) << "MiniTrace: socket " << errno;
+    return false;
+  }
+
+  memset(&server_addr, 0, sizeof server_addr);
+  server_addr.sun_family = AF_UNIX;
+  strcpy(&server_addr.sun_path[1], "/dev/mt/server");
+  int addrlen = sizeof server_addr.sun_family + strlen(&server_addr.sun_path[1]) + 1;
+
+  if (connect(socket_fd, (sockaddr *)&server_addr, addrlen) < 0) {
+    PLOG(ERROR) << "MiniTrace: connect " << errno;
+    close(socket_fd);
+    return false;
+  }
+
+  int16_t targetuid;
+  int written = 0;
+  LOG(INFO) << "MiniTrace: connect success!";
+  while (written == 0) {
+    written = read(socket_fd, &targetuid, 2);
+  }
+  if (written == 2) {
+    LOG(INFO) << "MiniTrace: read success, written " << written << " targetuid " << targetuid << " uid " << (uid&0xFFFF);
+    if (targetuid == (uid & 0xFFFF)) {
+      int32_t SPECIAL_VALUE = 0x7415963;
+      write(socket_fd, &SPECIAL_VALUE, 4);
+      read(socket_fd, buf, 100);
+      close(socket_fd);
+      return true;
+    }
+  } else {
+    PLOG(ERROR) << "MiniTrace: read " << errno << " written " << written;
+  }
+  close(socket_fd);
+  return false;
+}
+
 void MiniTrace::Start(bool force_start) {
   int uid = getuid();
   if ((uid % AID_USER) < AID_APP) {
@@ -151,45 +195,15 @@ void MiniTrace::Start(bool force_start) {
     }
   }
 
-  // Fetch package name
-  // File *proc = OS::OpenFileForReading("/proc/self/cmdline");
-  char tmp[100];
-  sprintf(tmp, "/proc/%d/cmdline", getpid());
-  File *proc = OS::OpenFileForReading(tmp);
-  char buf[64];
-  if (proc == NULL) {
-    PLOG(ERROR) << "MiniTrace: read /proc/self/cmdline failed";
-    return;
-  } else {
-    int64_t read = proc->Read(buf, 64, 0);
-    if (read >= 0) {
-      LOG(INFO) << "MiniTrace: /proc/self/cmdline success " << read << " buf=" << buf;
-    } else {
-      PLOG(ERROR) << "MiniTrace: /proc/self/cmdline failed";
-      return;
-    }
-    if (proc->Close() != 0) {
-      PLOG(ERROR) << "MiniTrace: /proc/self/cmdline cannot be closed";
-    }
-  }
-
-  if (memcmp(buf, "zygote", 6) == 0) {
-    LOG(INFO) << "Zygote process! with uid " << uid;
+  char buf[100];
+  if (!CreateSocketAndSendUID(buf, getuid())) {
     return;
   }
+  LOG(INFO) << "MiniTrace: uid found!! with name " << buf;
 
-  // remove another argument if exist.
-  char *pointer = strchr(buf, ' ');
   std::string trace_directory;
-  if (pointer != nullptr) {
-    *pointer = 0;
-    trace_directory.assign("/data/data/");
-    trace_directory.append(buf);
-  } else {
-    trace_directory.assign("/data/data/");
-    trace_directory.append(buf);
-  }
-
+  trace_directory.assign("/data/data/");
+  trace_directory.append(buf);
 
   uint32_t events = 0;
   int buffer_size = 1 * 1024 * 1024;
