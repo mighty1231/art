@@ -159,7 +159,7 @@ static int read_with_timeout (int socket_fd, void *buf, int size, int timeout_se
   return total_written;
 }
 
-static bool CreateSocketAndSendUID(void *buf, int uid) {
+static bool CreateSocketAndCheckUIDAndPrefix(void *buf, int uid) {
   int socket_fd;
   sockaddr_un server_addr;
   if ((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
@@ -203,7 +203,55 @@ static bool CreateSocketAndSendUID(void *buf, int uid) {
         PLOG(ERROR) << "MiniTrace: Read Prefix length " << errno;
       }
     } else {
-      PLOG(INFO) << "MiniTrace: Mismatch UID " << targetuid << " != " << (uid&0xFFFF);
+      PLOG(INFO) << "MiniTrace: Mismatch UID " << targetuid << " != " << (uid & 0xFFFF);
+    }
+  } else {
+    PLOG(ERROR) << "MiniTrace: Read UID " << errno;
+  }
+  close(socket_fd);
+  return false;
+}
+
+bool MiniTrace::CreateSocketAndAlertTheEnd(
+    std::string &trace_info_filename,
+    std::string &trace_data_filename
+  ) {
+  int socket_fd;
+  sockaddr_un server_addr;
+  if ((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
+    PLOG(ERROR) << "MiniTrace: socket " << errno;
+    return false;
+  }
+
+  memset(&server_addr, 0, sizeof server_addr);
+  server_addr.sun_family = AF_UNIX;
+  strcpy(&server_addr.sun_path[1], "/dev/mt/server");
+  int addrlen = sizeof server_addr.sun_family + strlen(&server_addr.sun_path[1]) + 1;
+
+  if (connect(socket_fd, (sockaddr *)&server_addr, addrlen) < 0) {
+    PLOG(ERROR) << "MiniTrace: connect " << errno;
+    close(socket_fd);
+    return false;
+  }
+  LOG(INFO) << "MiniTrace: connect success!";
+
+  int16_t targetuid;
+  int written = read_with_timeout(socket_fd, &targetuid, 2, 3);
+  if (written == 2) {
+    // check uid
+    LOG(INFO) << "MiniTrace: read success on uid " << getuid();
+    if (targetuid == ((int32_t) getuid() & 0xFFFF)) {
+      int32_t SPECIAL_VALUE = 0xDEAD;
+      write(socket_fd, &SPECIAL_VALUE, 4);
+
+      LOG(INFO) << "data file name " << trace_info_filename;
+      write(socket_fd, trace_info_filename.c_str(), trace_info_filename.length() + 1);
+      LOG(INFO) << "info file name " << trace_data_filename;
+      write(socket_fd, trace_data_filename.c_str(), trace_data_filename.length() + 1);
+      close(socket_fd);
+      return true;
+    } else {
+      PLOG(INFO) << "MiniTrace: Mismatch UID " << targetuid << " != " << (getuid() & 0xFFFF);
     }
   } else {
     PLOG(ERROR) << "MiniTrace: Read UID " << errno;
@@ -229,7 +277,7 @@ void MiniTrace::Start(bool force_start) {
   }
 
   char buf[100];
-  if (!CreateSocketAndSendUID(buf, getuid())) {
+  if (!CreateSocketAndCheckUIDAndPrefix(buf, getuid())) {
     return;
   }
   LOG(INFO) << "MiniTrace: uid found!! with name " << buf;
@@ -310,6 +358,7 @@ void MiniTrace::Stop() {
     }
   }
   if (the_trace != NULL) {
+    LOG(INFO) << "MiniTrace: Stop() called";
     the_trace->FinishTracing();
 
     /* uint32_t events = instrumentation::Instrumentation::kMethodEntered |
@@ -321,24 +370,32 @@ void MiniTrace::Stop() {
     runtime->GetInstrumentation()->DisableMethodTracing();
     runtime->GetInstrumentation()->RemoveListener(the_trace, the_trace->events_);
 
+    std::string trace_info_filename(the_trace->trace_info_file_->GetPath());
+    std::string trace_data_filename(the_trace->trace_data_file_->GetPath());
+
     if (the_trace->trace_info_file_.get() != nullptr) {
       // Do not try to erase, so flush and close explicitly.
       if (the_trace->trace_info_file_->Flush() != 0) {
-        PLOG(ERROR) << "Could not flush trace info file.";
+        PLOG(ERROR) << "MiniTrace: Could not flush trace info file.";
       }
       if (the_trace->trace_info_file_->Close() != 0) {
-        PLOG(ERROR) << "Could not close trace info file.";
+        PLOG(ERROR) << "MiniTrace: Could not close trace info file.";
       }
     }
     if (the_trace->trace_data_file_.get() != nullptr) {
       // Do not try to erase, so flush and close explicitly.
       if (the_trace->trace_data_file_->Flush() != 0) {
-        PLOG(ERROR) << "Could not flush trace data file.";
+        PLOG(ERROR) << "MiniTrace: Could not flush trace data file.";
       }
       if (the_trace->trace_data_file_->Close() != 0) {
-        PLOG(ERROR) << "Could not close trace data file.";
+        PLOG(ERROR) << "MiniTrace: Could not close trace data file.";
       }
     }
+
+    if (!the_trace->CreateSocketAndAlertTheEnd(trace_info_filename, trace_data_filename)) {
+      LOG(ERROR) << "MiniTrace: Alerting the end failed.";
+    }
+
     delete the_trace;
   }
   runtime->GetThreadList()->ResumeAll();

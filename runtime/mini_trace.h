@@ -144,6 +144,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   void DumpExecutionData(std::ostream& os) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   void DumpThreadList(std::ostream& os) LOCKS_EXCLUDED(Locks::thread_list_lock_);
 
+  bool CreateSocketAndAlertTheEnd(std::string &trace_info_filename, std::string &trace_data_filename);
+
   // Singleton instance of the Trace or NULL when no method tracing is active.
   static MiniTrace* volatile the_trace_ GUARDED_BY(Locks::trace_lock_);
 
