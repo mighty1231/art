@@ -138,7 +138,28 @@ static void Append4LE(uint8_t* buf, uint32_t val) {
   *buf++ = static_cast<uint8_t>(val >> 24);
 }
 
-static bool CreateSocketAndSendUID(char *buf, int uid) {
+static int read_with_timeout (int socket_fd, void *buf, int size, int timeout_sec) {
+  int total_written = 0;
+  int written;
+  if (timeout_sec <= 0 || timeout_sec > 10) {
+    return 0;
+  }
+  uint32_t run_until = (uint32_t) time(NULL) + timeout_sec;
+  int attempt = 0;
+  while (total_written < size) {
+    written = read(socket_fd, (char *) buf + total_written, size - total_written);
+    attempt++;
+
+    if ((uint32_t) time(NULL) >= run_until)
+      break;
+    total_written += written;
+  }
+  LOG(INFO) << "MiniTrace: read attempt " << attempt;
+
+  return total_written;
+}
+
+static bool CreateSocketAndSendUID(void *buf, int uid) {
   int socket_fd;
   sockaddr_un server_addr;
   if ((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
@@ -156,24 +177,36 @@ static bool CreateSocketAndSendUID(char *buf, int uid) {
     close(socket_fd);
     return false;
   }
+  LOG(INFO) << "MiniTrace: connect success!";
 
   int16_t targetuid;
-  int written = 0;
-  LOG(INFO) << "MiniTrace: connect success!";
-  while (written == 0) {
-    written = read(socket_fd, &targetuid, 2);
-  }
+  int32_t prefix_length;
+  int written = read_with_timeout(socket_fd, &targetuid, 2, 3);
   if (written == 2) {
+    // check uid
     LOG(INFO) << "MiniTrace: read success, written " << written << " targetuid " << targetuid << " uid " << (uid&0xFFFF);
     if (targetuid == (uid & 0xFFFF)) {
       int32_t SPECIAL_VALUE = 0x7415963;
       write(socket_fd, &SPECIAL_VALUE, 4);
-      read(socket_fd, buf, 100);
-      close(socket_fd);
-      return true;
+
+      // read available path
+      written = read_with_timeout(socket_fd, &prefix_length, 4, 3);
+      if (written == 4 && prefix_length > 0 && prefix_length < 256) {
+        written = read_with_timeout(socket_fd, buf, prefix_length + 1, 3);
+        if (written == prefix_length + 1) {
+          close(socket_fd);
+          return true;
+        } else {
+          LOG(ERROR) << "MiniTrace: Read Prefix " << errno;
+        }
+      } else {
+        PLOG(ERROR) << "MiniTrace: Read Prefix length " << errno;
+      }
+    } else {
+      PLOG(INFO) << "MiniTrace: Mismatch UID " << targetuid << " != " << (uid&0xFFFF);
     }
   } else {
-    PLOG(ERROR) << "MiniTrace: read " << errno << " written " << written;
+    PLOG(ERROR) << "MiniTrace: Read UID " << errno;
   }
   close(socket_fd);
   return false;
@@ -201,9 +234,8 @@ void MiniTrace::Start(bool force_start) {
   }
   LOG(INFO) << "MiniTrace: uid found!! with name " << buf;
 
-  std::string trace_directory;
-  trace_directory.assign("/data/data/");
-  trace_directory.append(buf);
+  std::string trace_log_prefix;
+  trace_log_prefix.assign(buf);
 
   uint32_t events = 0;
   int buffer_size = 1 * 1024 * 1024;
@@ -211,7 +243,7 @@ void MiniTrace::Start(bool force_start) {
   std::unique_ptr<File> trace_info_file;
   {
     std::ostringstream os;
-    os << trace_directory << "/mt_info.log";
+    os << trace_log_prefix << "info.log";
     std::string trace_info_filename(os.str());
     trace_info_file.reset(OS::CreateEmptyFile(trace_info_filename.c_str()));
     if (trace_info_file.get() == NULL) {
@@ -223,7 +255,7 @@ void MiniTrace::Start(bool force_start) {
   std::unique_ptr<File> trace_data_file;
   {
     std::ostringstream os;
-    os << trace_directory << "/mt_data.bin";
+    os << trace_log_prefix << "data.bin";
     std::string trace_data_filename(os.str());
     trace_data_file.reset(OS::CreateEmptyFile(trace_data_filename.c_str()));
     if (trace_data_file.get() == NULL) {
