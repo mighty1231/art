@@ -118,8 +118,19 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   static void StoreExitingThreadInfo(Thread* thread);
 
+  static bool ts_compare_(const std::pair<pid_t, std::string> &a,
+      const std::pair<pid_t, std::string> &b) {
+    if (a.first == b.first) {
+      return a.second.compare(b.second);
+    } else {
+      return a.first > b.first;
+    }
+  }
+
  private:
-  explicit MiniTrace(File* trace_info_file, File* trace_data_file, uint32_t events, int buffer_size);
+  explicit MiniTrace(File* trace_info_file, File *trace_method_info_file,
+                     File *trace_field_info_file, File *trace_thread_info_file,
+                     File* trace_data_file, uint32_t events, int buffer_size);
 
   void FinishTracing() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
@@ -135,16 +146,26 @@ class MiniTrace : public instrumentation::InstrumentationListener {
                            bool enter_event)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  bool HandleOverflow() LOCKS_EXCLUDED(Locks::trace_lock_);
+  bool HandleOverflow() LOCKS_EXCLUDED(Locks::trace_lock_) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  bool FlushBuffer();
+  bool FlushBuffer() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   void DumpMethodList(std::ostream& os) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   void DumpFieldList(std::ostream& os) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   void DumpExecutionData(std::ostream& os) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   void DumpThreadList(std::ostream& os) LOCKS_EXCLUDED(Locks::thread_list_lock_);
 
-  bool CreateSocketAndAlertTheEnd(std::string &trace_info_filename, std::string &trace_data_filename);
+  bool CreateSocketAndAlertTheEnd(
+      const std::string &trace_info_filename,
+      const std::string &trace_method_info_filename,
+      const std::string &trace_field_info_filename,
+      const std::string &trace_thread_info_filename,
+      const std::string &trace_data_filename
+    );
+
+  void LogNewMethod(mirror::ArtMethod *method);
+  void LogNewField(mirror::ArtField *field);
+  void LogNewThread(Thread *thread);
 
   // Singleton instance of the Trace or NULL when no method tracing is active.
   static MiniTrace* volatile the_trace_ GUARDED_BY(Locks::trace_lock_);
@@ -152,11 +173,35 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   // File for log trace info
   std::unique_ptr<File> trace_info_file_;
 
+  // File for log method info
+  std::unique_ptr<File> trace_method_info_file_;
+
+  // File for log field info
+  std::unique_ptr<File> trace_field_info_file_;
+
+  // File for log thread info
+  std::unique_ptr<File> trace_thread_info_file_;
+
   // File for log trace data
   std::unique_ptr<File> trace_data_file_;
 
   // Buffer to store trace data.
   std::unique_ptr<uint8_t> buf_;
+
+  // Buffer to store trace method data.
+  std::list<mirror::ArtMethod*> methods_not_stored_;
+
+  // Buffer to store trace field data.
+  std::list<mirror::ArtField*> fields_not_stored_;
+
+  // Buffer to store thread data
+  std::set<std::pair<pid_t, std::string>, decltype(&ts_compare_)> threads_stored_;
+
+  // Buffer to store thread data
+  std::set<std::pair<pid_t, std::string>, decltype(&ts_compare_)> threads_not_stored_;
+
+  // Offset into buf_.
+  AtomicInteger cur_offset_;
 
   // Events, default open every available events.
   uint32_t events_;
@@ -172,9 +217,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   // Time trace was created.
   const uint64_t start_time_;
-
-  // Offset into buf_.
-  AtomicInteger cur_offset_;
 
   // Overflow counter
   int buffer_overflow_count_;

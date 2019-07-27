@@ -213,8 +213,11 @@ static bool CreateSocketAndCheckUIDAndPrefix(void *buf, int uid) {
 }
 
 bool MiniTrace::CreateSocketAndAlertTheEnd(
-    std::string &trace_info_filename,
-    std::string &trace_data_filename
+    const std::string &trace_info_filename,
+    const std::string &trace_method_info_filename,
+    const std::string &trace_field_info_filename,
+    const std::string &trace_thread_info_filename,
+    const std::string &trace_data_filename
   ) {
   int socket_fd;
   sockaddr_un server_addr;
@@ -244,8 +247,14 @@ bool MiniTrace::CreateSocketAndAlertTheEnd(
       int32_t SPECIAL_VALUE = 0xDEAD;
       write(socket_fd, &SPECIAL_VALUE, 4);
 
-      LOG(INFO) << "data file name " << trace_info_filename;
+      LOG(INFO) << "data info name " << trace_info_filename;
       write(socket_fd, trace_info_filename.c_str(), trace_info_filename.length() + 1);
+      LOG(INFO) << "data method info name " << trace_method_info_filename;
+      write(socket_fd, trace_method_info_filename.c_str(), trace_method_info_filename.length() + 1);
+      LOG(INFO) << "data field info name " << trace_field_info_filename;
+      write(socket_fd, trace_field_info_filename.c_str(), trace_field_info_filename.length() + 1);
+      LOG(INFO) << "data thread info name " << trace_thread_info_filename;
+      write(socket_fd, trace_thread_info_filename.c_str(), trace_thread_info_filename.length() + 1);
       LOG(INFO) << "info file name " << trace_data_filename;
       write(socket_fd, trace_data_filename.c_str(), trace_data_filename.length() + 1);
       close(socket_fd);
@@ -289,6 +298,9 @@ void MiniTrace::Start(bool force_start) {
   int buffer_size = 1 * 1024 * 1024;
 
   std::unique_ptr<File> trace_info_file;
+  std::unique_ptr<File> trace_method_info_file;
+  std::unique_ptr<File> trace_field_info_file;
+  std::unique_ptr<File> trace_thread_info_file;
   {
     std::ostringstream os;
     os << trace_log_prefix << "info.log";
@@ -296,6 +308,33 @@ void MiniTrace::Start(bool force_start) {
     trace_info_file.reset(OS::CreateEmptyFile(trace_info_filename.c_str()));
     if (trace_info_file.get() == NULL) {
       LOG(INFO) << "MiniTrace: Unable to open trace info file '" << trace_info_filename << "'";
+      return;
+    }
+
+    os.str("");
+    os << trace_log_prefix << "info_m.log";
+    std::string trace_method_info_filename(os.str());
+    trace_method_info_file.reset(OS::CreateEmptyFile(trace_method_info_filename.c_str()));
+    if (trace_method_info_file.get() == NULL) {
+      LOG(INFO) << "MiniTrace: Unable to open method info file '" << trace_method_info_filename << "'";
+      return;
+    }
+
+    os.str("");
+    os << trace_log_prefix << "info_f.log";
+    std::string trace_field_info_filename(os.str());
+    trace_field_info_file.reset(OS::CreateEmptyFile(trace_field_info_filename.c_str()));
+    if (trace_field_info_file.get() == NULL) {
+      LOG(INFO) << "MiniTrace: Unable to open field info file '" << trace_field_info_filename << "'";
+      return;
+    }
+
+    os.str("");
+    os << trace_log_prefix << "info_t.log";
+    std::string trace_thread_info_filename(os.str());
+    trace_thread_info_file.reset(OS::CreateEmptyFile(trace_thread_info_filename.c_str()));
+    if (trace_thread_info_file.get() == NULL) {
+      LOG(INFO) << "MiniTrace: Unable to open thread info file '" << trace_thread_info_filename << "'";
       return;
     }
   }
@@ -332,6 +371,9 @@ void MiniTrace::Start(bool force_start) {
       }
 
       the_trace_ = new MiniTrace(trace_info_file.release(),
+                                 trace_method_info_file.release(),
+                                 trace_field_info_file.release(),
+                                 trace_thread_info_file.release(),
                                  trace_data_file.release(),
                                  events,
                                  buffer_size);
@@ -371,6 +413,9 @@ void MiniTrace::Stop() {
     runtime->GetInstrumentation()->RemoveListener(the_trace, the_trace->events_);
 
     std::string trace_info_filename(the_trace->trace_info_file_->GetPath());
+    std::string trace_method_info_filename(the_trace->trace_method_info_file_->GetPath());
+    std::string trace_field_info_filename(the_trace->trace_field_info_file_->GetPath());
+    std::string trace_thread_info_filename(the_trace->trace_thread_info_file_->GetPath());
     std::string trace_data_filename(the_trace->trace_data_file_->GetPath());
 
     if (the_trace->trace_info_file_.get() != nullptr) {
@@ -380,6 +425,33 @@ void MiniTrace::Stop() {
       }
       if (the_trace->trace_info_file_->Close() != 0) {
         PLOG(ERROR) << "MiniTrace: Could not close trace info file.";
+      }
+    }
+    if (the_trace->trace_method_info_file_.get() != nullptr) {
+      // Do not try to erase, so flush and close explicitly.
+      if (the_trace->trace_method_info_file_->Flush() != 0) {
+        PLOG(ERROR) << "MiniTrace: Could not flush method info file.";
+      }
+      if (the_trace->trace_method_info_file_->Close() != 0) {
+        PLOG(ERROR) << "MiniTrace: Could not close method info file.";
+      }
+    }
+    if (the_trace->trace_field_info_file_.get() != nullptr) {
+      // Do not try to erase, so flush and close explicitly.
+      if (the_trace->trace_field_info_file_->Flush() != 0) {
+        PLOG(ERROR) << "MiniTrace: Could not flush field info file.";
+      }
+      if (the_trace->trace_field_info_file_->Close() != 0) {
+        PLOG(ERROR) << "MiniTrace: Could not close field info file.";
+      }
+    }
+    if (the_trace->trace_thread_info_file_.get() != nullptr) {
+      // Do not try to erase, so flush and close explicitly.
+      if (the_trace->trace_thread_info_file_->Flush() != 0) {
+        PLOG(ERROR) << "MiniTrace: Could not flush thread info file.";
+      }
+      if (the_trace->trace_thread_info_file_->Close() != 0) {
+        PLOG(ERROR) << "MiniTrace: Could not close thread info file.";
       }
     }
     if (the_trace->trace_data_file_.get() != nullptr) {
@@ -392,7 +464,13 @@ void MiniTrace::Stop() {
       }
     }
 
-    if (!the_trace->CreateSocketAndAlertTheEnd(trace_info_filename, trace_data_filename)) {
+    if (!the_trace->CreateSocketAndAlertTheEnd(
+          trace_info_filename,
+          trace_method_info_filename,
+          trace_field_info_filename,
+          trace_thread_info_filename,
+          trace_data_filename
+        )) {
       LOG(ERROR) << "MiniTrace: Alerting the end failed.";
     }
 
@@ -402,6 +480,7 @@ void MiniTrace::Stop() {
 }
 
 void MiniTrace::Shutdown() {
+  LOG(INFO) << "MiniTrace: Shutdown...";
   if (GetMethodTracingMode() != kTracingInactive) {
     Stop();
   }
@@ -427,12 +506,22 @@ TracingMode MiniTrace::GetMethodTracingMode() {
   }
 }
 
-MiniTrace::MiniTrace(File* trace_info_file, File* trace_data_file,
+MiniTrace::MiniTrace(File* trace_info_file, File *trace_method_info_file,
+      File *trace_field_info_file, File *trace_thread_info_file, File* trace_data_file,
       uint32_t events, int buffer_size)
-    : trace_info_file_(trace_info_file), trace_data_file_(trace_data_file),
-      buf_(new uint8_t[buffer_size]()), events_(events), do_coverage_((events & kDoCoverage) != 0),
+    : trace_info_file_(trace_info_file),
+      trace_method_info_file_(trace_method_info_file),
+      trace_field_info_file_(trace_field_info_file),
+      trace_thread_info_file_(trace_thread_info_file),
+      trace_data_file_(trace_data_file),
+      buf_(new uint8_t[buffer_size]()), 
+      // methods_not_stored_(new uint8_t[buffer_size]()), ??
+      // fields_not_stored_(new uint8_t[buffer_size]()),??
+      // threads_not_stored_(), ??
+      cur_offset_(0),
+      events_(events), do_coverage_((events & kDoCoverage) != 0),
       do_filter_((events & kDoFilter) != 0), buffer_size_(buffer_size), start_time_(MicroTime()),
-      cur_offset_(0), buffer_overflow_count_(0) {
+      buffer_overflow_count_(0) {
 }
 
 void MiniTrace::FinishTracing() {
@@ -486,6 +575,13 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
                          const JValue& return_value) {
   UNUSED(return_value);
   LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodExited);
+
+  // log for android.app.activity performDestroy and performPause
+  if (PrettyDescriptor(method->GetDeclaringClassDescriptor()).compare("android.app.Activity") == 0) {
+    if (strcmp(method->GetName(), "performDestroy") == 0 || strcmp(method->GetName(), "performPause") == 0) {
+      FlushBuffer();
+    }
+  }
 }
 
 void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
@@ -523,7 +619,24 @@ bool MiniTrace::HandleOverflow() {
   }
 }
 
+static void DumpThreadOnFlush(Thread* t, void* arg) {
+  auto &threads = *reinterpret_cast<std::set<std::pair<pid_t, std::string>,
+              decltype(&MiniTrace::ts_compare_)>*>(arg);
+
+  std::string name;
+  t->GetThreadName(name);
+  threads.insert(std::pair<pid_t, std::string>(t->GetTid(), name));
+}
+
+static void DumpThread(Thread* t, void* arg) {
+  std::ostream& os = *reinterpret_cast<std::ostream*>(arg);
+  std::string name;
+  t->GetThreadName(name);
+  os << t->GetTid() << "\t" << name << "\n";
+}
+
 bool MiniTrace::FlushBuffer() {
+  LOG(INFO) << "MiniTrace: FlushBuffer called";
 
   int32_t cur_offset = cur_offset_.LoadRelaxed();
 
@@ -546,12 +659,12 @@ bool MiniTrace::FlushBuffer() {
       case kMiniTraceMethodExit:
       case kMiniTraceUnroll:
         length = 6;
-        visited_methods_.insert(DecodeMiniTraceMethodId(aid));
+        LogNewMethod(DecodeMiniTraceMethodId(aid));
         break;
       case kMiniTraceFieldRead:
       case kMiniTraceFieldWrite:
         length = 14;
-        visited_fields_.insert(DecodeMiniTraceFieldId(aid));
+        LogNewField(DecodeMiniTraceFieldId(aid));
         break;
       case kMiniTraceMonitorEnter:
       case kMiniTraceMonitorExit:
@@ -561,6 +674,66 @@ bool MiniTrace::FlushBuffer() {
         UNIMPLEMENTED(FATAL) << "Unexpected action: " << action;
     }
     ptr += length;
+  }
+
+  {
+    std::ostringstream os;
+    LOG(INFO) << "MiniTrace: methods not stored " << methods_not_stored_.size();
+    for (const auto& method : methods_not_stored_) {
+      os << StringPrintf("%p\t%s\t%s\t%s\t%s\n", method,
+          PrettyDescriptor(method->GetDeclaringClassDescriptor()).c_str(), method->GetName(),
+          method->GetSignature().ToString().c_str(), method->GetDeclaringClassSourceFile());
+    }
+    std::string buf(os.str());
+    if (!trace_method_info_file_->WriteFully(buf.c_str(), buf.length())) {
+      std::string detail(StringPrintf("Trace method info write failed: %s", strerror(errno)));
+      PLOG(ERROR) << detail;
+      ThrowRuntimeException("%s", detail.c_str());
+    }
+    methods_not_stored_.clear();
+  }
+
+  {
+    std::ostringstream os;
+    LOG(INFO) << "MiniTrace: fields not stored " << fields_not_stored_.size();
+    for (const auto& field : fields_not_stored_) {
+      const DexFile* dex_file = field->GetDexFile();
+      const DexFile::FieldId& field_id = dex_file->GetFieldId(field->GetDexFieldIndex());
+      os << StringPrintf("%p\t%s\t%s\t%s\n", field,
+          PrettyDescriptor(dex_file->GetFieldDeclaringClassDescriptor(field_id)).c_str(), field->GetName(),
+          field->GetTypeDescriptor());
+    }
+    std::string buf(os.str());
+    if (!trace_field_info_file_->WriteFully(buf.c_str(), buf.length())) {
+      std::string detail(StringPrintf("Trace field info write failed: %s", strerror(errno)));
+      PLOG(ERROR) << detail;
+      ThrowRuntimeException("%s", detail.c_str());
+    }
+    fields_not_stored_.clear();
+  }
+
+  {
+    {
+      Thread* self = Thread::Current();
+      Locks::thread_list_lock_->AssertNotHeld(self);
+      MutexLock mu(self, *Locks::thread_list_lock_);
+      Runtime::Current()->GetThreadList()->ForEach(DumpThreadOnFlush, &threads_not_stored_);
+    }
+    std::ostringstream os;
+    LOG(INFO) << "MiniTrace: threads not stored " << threads_not_stored_.size();
+    for (auto it : threads_not_stored_) {
+      if (threads_stored_.find(it) == threads_stored_.end()) {
+        threads_stored_.insert(it);
+        os << it.first << "\t" << it.second << "\n";
+      }
+    }
+    std::string buf(os.str());
+    if (!trace_thread_info_file_->WriteFully(buf.c_str(), buf.length())) {
+      std::string detail(StringPrintf("Trace thread info write failed: %s", strerror(errno)));
+      PLOG(ERROR) << detail;
+      ThrowRuntimeException("%s", detail.c_str());
+    }
+    threads_not_stored_.clear();
   }
 
   cur_offset_.StoreRelease(0);
@@ -708,13 +881,6 @@ void MiniTrace::DumpFieldList(std::ostream& os) {
   }
 }
 
-static void DumpThread(Thread* t, void* arg) {
-  std::ostream& os = *reinterpret_cast<std::ostream*>(arg);
-  std::string name;
-  t->GetThreadName(name);
-  os << t->GetTid() << "\t" << name << "\n";
-}
-
 void MiniTrace::DumpExecutionData(std::ostream& os) {
   for (auto it : execution_data_) {
     mirror::ArtMethod* method = it.first;
@@ -753,6 +919,23 @@ void MiniTrace::StoreExitingThreadInfo(Thread* thread) {
     std::string name;
     thread->GetThreadName(name);
     the_trace_->exited_threads_.Put(thread->GetTid(), name);
+    the_trace_->threads_not_stored_.insert(
+      std::pair<pid_t, std::string>(thread->GetTid(), name));
+  }
+}
+
+
+void MiniTrace::LogNewMethod(mirror::ArtMethod *method) {
+  if (visited_methods_.find(method) == visited_methods_.end()) {
+    methods_not_stored_.push_back(method);
+    visited_methods_.insert(method);
+  }
+}
+
+void MiniTrace::LogNewField(mirror::ArtField *field) {
+  if (visited_fields_.find(field) == visited_fields_.end()) {
+    fields_not_stored_.push_back(field);
+    visited_fields_.insert(field);
   }
 }
 
@@ -792,7 +975,7 @@ bool* MiniTrace::GetExecutionData(Thread* self, mirror::ArtMethod* method) {
       bool* execution_data = new bool[insns_size];
       memset(execution_data, 0, insns_size * sizeof(bool));
 
-      the_trace->visited_methods_.insert(method);
+      the_trace->LogNewMethod(method);
       the_trace->execution_data_.Put(method, execution_data);
       return execution_data;
     }
