@@ -164,7 +164,9 @@ static bool CreateSocketAndCheckUIDAndPrefix(void *buf, int uid) {
     // check uid
     LOG(INFO) << "MiniTrace: read success, written " << written << " targetuid " << targetuid << " uid " << (uid&0xFFFF);
     if (targetuid == (uid & 0xFFFF)) {
+      int32_t pid = getpid();
       int32_t SPECIAL_VALUE = 0x7415963;
+      write(socket_fd, &pid, 4);
       write(socket_fd, &SPECIAL_VALUE, 4);
 
       // read available path
@@ -221,7 +223,9 @@ bool MiniTrace::CreateSocketAndAlertTheEnd(
     // check uid
     LOG(INFO) << "MiniTrace: read success on uid " << getuid();
     if (targetuid == ((int32_t) getuid() & 0xFFFF)) {
+      int32_t pid = getpid();
       int32_t SPECIAL_VALUE = 0xDEAD;
+      write(socket_fd, &pid, 4);
       write(socket_fd, &SPECIAL_VALUE, 4);
 
       LOG(INFO) << "data method info name " << trace_method_info_filename;
