@@ -67,8 +67,6 @@ enum MiniTraceEventLength {
   kMiniTraceLargestEventLength = kMiniTraceFieldEventLength,
 };
 
-static const char     kMiniTraceTokenChar             = '*';
-
 MiniTrace* volatile MiniTrace::the_trace_ = NULL;
 
 
@@ -215,7 +213,6 @@ static bool CreateSocketAndCheckUIDAndPrefix(void *buf, int uid) {
 }
 
 bool MiniTrace::CreateSocketAndAlertTheEnd(
-    const std::string &trace_info_filename,
     const std::string &trace_method_info_filename,
     const std::string &trace_field_info_filename,
     const std::string &trace_thread_info_filename,
@@ -249,8 +246,6 @@ bool MiniTrace::CreateSocketAndAlertTheEnd(
       int32_t SPECIAL_VALUE = 0xDEAD;
       write(socket_fd, &SPECIAL_VALUE, 4);
 
-      LOG(INFO) << "data info name " << trace_info_filename;
-      write(socket_fd, trace_info_filename.c_str(), trace_info_filename.length() + 1);
       LOG(INFO) << "data method info name " << trace_method_info_filename;
       write(socket_fd, trace_method_info_filename.c_str(), trace_method_info_filename.length() + 1);
       LOG(INFO) << "data field info name " << trace_field_info_filename;
@@ -299,21 +294,11 @@ void MiniTrace::Start(bool force_start) {
   uint32_t events = 0;
   int buffer_size = 1 * 1024 * 1024;
 
-  std::unique_ptr<File> trace_info_file;
   std::unique_ptr<File> trace_method_info_file;
   std::unique_ptr<File> trace_field_info_file;
   std::unique_ptr<File> trace_thread_info_file;
   {
     std::ostringstream os;
-    os << trace_log_prefix << "info.log";
-    std::string trace_info_filename(os.str());
-    trace_info_file.reset(OS::CreateEmptyFile(trace_info_filename.c_str()));
-    if (trace_info_file.get() == NULL) {
-      LOG(INFO) << "MiniTrace: Unable to open trace info file '" << trace_info_filename << "'";
-      return;
-    }
-
-    os.str("");
     os << trace_log_prefix << "info_m.log";
     std::string trace_method_info_filename(os.str());
     trace_method_info_file.reset(OS::CreateEmptyFile(trace_method_info_filename.c_str()));
@@ -372,8 +357,7 @@ void MiniTrace::Start(bool force_start) {
                  kDoCoverage;
       }
 
-      the_trace_ = new MiniTrace(trace_info_file.release(),
-                                 trace_method_info_file.release(),
+      the_trace_ = new MiniTrace(trace_method_info_file.release(),
                                  trace_field_info_file.release(),
                                  trace_thread_info_file.release(),
                                  trace_data_file.release(),
@@ -414,21 +398,11 @@ void MiniTrace::Stop() {
     runtime->GetInstrumentation()->DisableMethodTracing();
     runtime->GetInstrumentation()->RemoveListener(the_trace, the_trace->events_);
 
-    std::string trace_info_filename(the_trace->trace_info_file_->GetPath());
     std::string trace_method_info_filename(the_trace->trace_method_info_file_->GetPath());
     std::string trace_field_info_filename(the_trace->trace_field_info_file_->GetPath());
     std::string trace_thread_info_filename(the_trace->trace_thread_info_file_->GetPath());
     std::string trace_data_filename(the_trace->trace_data_file_->GetPath());
 
-    if (the_trace->trace_info_file_.get() != nullptr) {
-      // Do not try to erase, so flush and close explicitly.
-      if (the_trace->trace_info_file_->Flush() != 0) {
-        PLOG(ERROR) << "MiniTrace: Could not flush trace info file.";
-      }
-      if (the_trace->trace_info_file_->Close() != 0) {
-        PLOG(ERROR) << "MiniTrace: Could not close trace info file.";
-      }
-    }
     if (the_trace->trace_method_info_file_.get() != nullptr) {
       // Do not try to erase, so flush and close explicitly.
       if (the_trace->trace_method_info_file_->Flush() != 0) {
@@ -467,7 +441,6 @@ void MiniTrace::Stop() {
     }
 
     if (!the_trace->CreateSocketAndAlertTheEnd(
-          trace_info_filename,
           trace_method_info_filename,
           trace_field_info_filename,
           trace_thread_info_filename,
@@ -508,11 +481,10 @@ TracingMode MiniTrace::GetMethodTracingMode() {
   }
 }
 
-MiniTrace::MiniTrace(File* trace_info_file, File *trace_method_info_file,
-      File *trace_field_info_file, File *trace_thread_info_file, File* trace_data_file,
+MiniTrace::MiniTrace(File *trace_method_info_file, File *trace_field_info_file,
+      File *trace_thread_info_file, File* trace_data_file,
       uint32_t events, int buffer_size)
-    : trace_info_file_(trace_info_file),
-      trace_method_info_file_(trace_method_info_file),
+    : trace_method_info_file_(trace_method_info_file),
       trace_field_info_file_(trace_field_info_file),
       trace_thread_info_file_(trace_thread_info_file),
       trace_data_file_(trace_data_file),
@@ -528,25 +500,6 @@ MiniTrace::MiniTrace(File* trace_info_file, File *trace_method_info_file,
 
 void MiniTrace::FinishTracing() {
   FlushBuffer();
-
-  std::ostringstream os;
-
-  os << StringPrintf("%cthreads\n", kMiniTraceTokenChar);
-  DumpThreadList(os);
-  os << StringPrintf("%cmethods\n", kMiniTraceTokenChar);
-  DumpMethodList(os);
-  os << StringPrintf("%cfields\n", kMiniTraceTokenChar);
-  DumpFieldList(os);
-  os << StringPrintf("%ccoverage\n", kMiniTraceTokenChar);
-  DumpExecutionData(os);
-  os << StringPrintf("%cend\n", kMiniTraceTokenChar);
-
-  std::string header(os.str());
-  if (!trace_info_file_->WriteFully(header.c_str(), header.length())) {
-    std::string detail(StringPrintf("Trace info write failed: %s", strerror(errno)));
-    PLOG(ERROR) << detail;
-    ThrowRuntimeException("%s", detail.c_str());
-  }
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,

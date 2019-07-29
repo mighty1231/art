@@ -132,9 +132,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   typedef std::set<std::pair<pid_t, std::string>, tn_compare_> tn_type;
 
  private:
-  explicit MiniTrace(File* trace_info_file, File *trace_method_info_file,
-                     File *trace_field_info_file, File *trace_thread_info_file,
-                     File* trace_data_file, uint32_t events, int buffer_size);
+  explicit MiniTrace(File *trace_method_info_file, File *trace_field_info_file,
+                     File *trace_thread_info_file, File* trace_data_file,
+                     uint32_t events, int buffer_size);
 
   void FinishTracing() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
@@ -160,7 +160,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   void DumpThreadList(std::ostream& os) LOCKS_EXCLUDED(Locks::thread_list_lock_);
 
   bool CreateSocketAndAlertTheEnd(
-      const std::string &trace_info_filename,
       const std::string &trace_method_info_filename,
       const std::string &trace_field_info_filename,
       const std::string &trace_thread_info_filename,
@@ -173,9 +172,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   // Singleton instance of the Trace or NULL when no method tracing is active.
   static MiniTrace* volatile the_trace_ GUARDED_BY(Locks::trace_lock_);
-
-  // File for log trace info
-  std::unique_ptr<File> trace_info_file_;
 
   // File for log method info
   std::unique_ptr<File> trace_method_info_file_;
