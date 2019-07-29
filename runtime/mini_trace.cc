@@ -57,6 +57,7 @@ enum MiniTraceAction {
     kMiniTraceFieldWrite = 0x04,        // field write
     kMiniTraceMonitorEnter = 0x05,      // monitor enter
     kMiniTraceMonitorExit = 0x06,       // monitor exit
+    kMiniTraceExceptionCaught = 0x07,   // exception caught
     kMiniTraceActionMask = 0x07,        // three bits
 };
 
@@ -98,29 +99,6 @@ static mirror::ArtField* DecodeMiniTraceFieldId(uint32_t tfid) {
 
 static MiniTraceAction DecodeMiniTraceAction(uint32_t tmid) {
   return static_cast<MiniTraceAction>(tmid & kMiniTraceActionMask);
-}
-
-static uint32_t EncodeMiniTraceMethodAndAction(mirror::ArtMethod* method,
-                                           MiniTraceAction action) {
-  uint32_t tmid = PointerToLowMemUInt32(method) | action;
-  DCHECK_EQ(method, DecodeMiniTraceMethodId(tmid));
-  return tmid;
-}
-
-static uint32_t EncodeMiniTraceFieldAndAction(mirror::ArtField* field,
-                                           MiniTraceAction action) {
-  uint32_t tfid = PointerToLowMemUInt32(field) | action;
-  return tfid;
-}
-
-static uint32_t EncodeMiniTraceObjectAndAction(mirror::Object* object,
-                                           MiniTraceAction action) {
-  uint32_t toid = PointerToLowMemUInt32(object) | action;
-  return toid;
-}
-
-static uint32_t EncodeMiniTraceObject(mirror::Object* object) {
-  return PointerToLowMemUInt32(object);
 }
 
 // TODO: put this somewhere with the big-endian equivalent used by JDWP.
@@ -354,6 +332,7 @@ void MiniTrace::Start(bool force_start) {
                  instrumentation::Instrumentation::kMethodUnwind |
                  instrumentation::Instrumentation::kFieldRead |
                  instrumentation::Instrumentation::kFieldWritten |
+                 instrumentation::Instrumentation::kExceptionCaught |
                  kDoCoverage;
       }
 
@@ -546,9 +525,36 @@ void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
 
 void MiniTrace::ExceptionCaught(Thread* thread, const ThrowLocation& throw_location,
                             mirror::ArtMethod* catch_method, uint32_t catch_dex_pc,
-                            mirror::Throwable* exception_object)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  LOG(ERROR) << "Unexpected exception caught event in tracing";
+                            mirror::Throwable* exception_object) {
+  MiniTraceAction action = kMiniTraceExceptionCaught;
+
+  // Advance cur_offset_ atomically.
+  uint16_t record_size;
+
+  std::string content = exception_object->Dump();
+  record_size = content.length() + 2 + 4 + 1;
+  int32_t new_offset;
+  int32_t old_offset;
+  int32_t overflow_check;
+  do {
+    old_offset = cur_offset_.LoadRelaxed();
+    new_offset = old_offset + record_size;
+    overflow_check = old_offset + kMiniTraceLargestEventLength;
+    if (overflow_check > buffer_size_) {
+      if (HandleOverflow()) {
+        continue;
+      }
+      return;
+    }
+  } while (!cur_offset_.CompareExchangeWeakSequentiallyConsistent(old_offset, new_offset));
+
+  // Write data
+  uint8_t* ptr = buf_.get() + old_offset;
+  Append2LE(ptr, thread->GetTid());
+  Append4LE(ptr + 2, (record_size << 3) | action);
+  strcpy((char *) ptr + 6, content.c_str());
+
+  FlushBuffer();
 }
 
 bool MiniTrace::HandleOverflow() {
@@ -623,6 +629,9 @@ bool MiniTrace::FlushBuffer() {
       case kMiniTraceMonitorEnter:
       case kMiniTraceMonitorExit:
         length = 10;
+        break;
+      case kMiniTraceExceptionCaught:
+        length = aid >> 3;
         break;
       default:
         UNIMPLEMENTED(FATAL) << "Unexpected action: " << action;
@@ -725,8 +734,8 @@ void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, u
     }
   } while (!cur_offset_.CompareExchangeWeakSequentiallyConsistent(old_offset, new_offset));
 
-
-  uint32_t method_value = EncodeMiniTraceMethodAndAction(method, action);
+  uint32_t method_value = PointerToLowMemUInt32(method) | action;
+  DCHECK_EQ(method, DecodeMiniTraceMethodId(method_value));
 
   // Write data
   uint8_t* ptr = buf_.get() + old_offset;
@@ -764,7 +773,7 @@ void MiniTrace::LogFieldTraceEvent(Thread* thread, mirror::Object *this_object, 
     }
   } while (!cur_offset_.CompareExchangeWeakSequentiallyConsistent(old_offset, new_offset));
 
-  uint32_t field_value = EncodeMiniTraceFieldAndAction(field, action);
+  uint32_t field_value = PointerToLowMemUInt32(field) | action;
 
   // Write data
   uint8_t* ptr = buf_.get() + old_offset;
@@ -772,7 +781,7 @@ void MiniTrace::LogFieldTraceEvent(Thread* thread, mirror::Object *this_object, 
   Append4LE(ptr + 2, field_value);
   ptr += 6;
 
-  uint32_t object_value = EncodeMiniTraceObject(this_object);
+  uint32_t object_value = PointerToLowMemUInt32(this_object);
   Append4LE(ptr, object_value);
   Append4LE(ptr + 4, dex_pc);
 }
@@ -802,7 +811,7 @@ void MiniTrace::LogMonitorTraceEvent(Thread* thread, mirror::Object* lock_object
     }
   } while (!cur_offset_.CompareExchangeWeakSequentiallyConsistent(old_offset, new_offset));
 
-  uint32_t object_value = EncodeMiniTraceObjectAndAction(lock_object, action);
+  uint32_t object_value = PointerToLowMemUInt32(lock_object) | action;
 
   // Write data
   uint8_t* ptr = buf_.get() + old_offset;
