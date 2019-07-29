@@ -118,14 +118,18 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   static void StoreExitingThreadInfo(Thread* thread);
 
-  static bool ts_compare_(const std::pair<pid_t, std::string> &a,
-      const std::pair<pid_t, std::string> &b) {
-    if (a.first == b.first) {
-      return a.second.compare(b.second);
-    } else {
-      return a.first > b.first;
-    }
-  }
+  struct tn_compare_ {
+    bool operator() (const std::pair<pid_t, std::string> &a,
+          const std::pair<pid_t, std::string> &b) {
+        if (a.first == b.first) {
+          return a.second.compare(b.second);
+        } else {
+          return a.first > b.first;
+        }
+      }
+  };
+
+  typedef std::set<std::pair<pid_t, std::string>, tn_compare_> tn_type;
 
  private:
   explicit MiniTrace(File* trace_info_file, File *trace_method_info_file,
@@ -195,10 +199,10 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   std::list<mirror::ArtField*> fields_not_stored_;
 
   // Buffer to store thread data
-  std::set<std::pair<pid_t, std::string>, decltype(&ts_compare_)> threads_stored_;
+  tn_type threads_stored_;
 
   // Buffer to store thread data
-  std::set<std::pair<pid_t, std::string>, decltype(&ts_compare_)> threads_not_stored_;
+  tn_type threads_not_stored_;
 
   // Offset into buf_.
   AtomicInteger cur_offset_;

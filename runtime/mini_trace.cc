@@ -71,6 +71,7 @@ static const char     kMiniTraceTokenChar             = '*';
 
 MiniTrace* volatile MiniTrace::the_trace_ = NULL;
 
+
 static uint16_t GetRecordSize(MiniTraceAction action) {
   switch (action) {
     case kMiniTraceMethodEnter:
@@ -154,7 +155,8 @@ static int read_with_timeout (int socket_fd, void *buf, int size, int timeout_se
       break;
     total_written += written;
   }
-  LOG(INFO) << "MiniTrace: read attempt " << attempt;
+  if (attempt != 1)
+    LOG(INFO) << "MiniTrace: read attempt " << attempt;
 
   return total_written;
 }
@@ -620,12 +622,11 @@ bool MiniTrace::HandleOverflow() {
 }
 
 static void DumpThreadOnFlush(Thread* t, void* arg) {
-  auto &threads = *reinterpret_cast<std::set<std::pair<pid_t, std::string>,
-              decltype(&MiniTrace::ts_compare_)>*>(arg);
+  auto threads = reinterpret_cast<MiniTrace::tn_type *>(arg);
 
   std::string name;
   t->GetThreadName(name);
-  threads.insert(std::pair<pid_t, std::string>(t->GetTid(), name));
+  threads->emplace(t->GetTid(), name);
 }
 
 static void DumpThread(Thread* t, void* arg) {
@@ -678,7 +679,6 @@ bool MiniTrace::FlushBuffer() {
 
   {
     std::ostringstream os;
-    LOG(INFO) << "MiniTrace: methods not stored " << methods_not_stored_.size();
     for (const auto& method : methods_not_stored_) {
       os << StringPrintf("%p\t%s\t%s\t%s\t%s\n", method,
           PrettyDescriptor(method->GetDeclaringClassDescriptor()).c_str(), method->GetName(),
@@ -695,7 +695,6 @@ bool MiniTrace::FlushBuffer() {
 
   {
     std::ostringstream os;
-    LOG(INFO) << "MiniTrace: fields not stored " << fields_not_stored_.size();
     for (const auto& field : fields_not_stored_) {
       const DexFile* dex_file = field->GetDexFile();
       const DexFile::FieldId& field_id = dex_file->GetFieldId(field->GetDexFieldIndex());
@@ -720,7 +719,6 @@ bool MiniTrace::FlushBuffer() {
       Runtime::Current()->GetThreadList()->ForEach(DumpThreadOnFlush, &threads_not_stored_);
     }
     std::ostringstream os;
-    LOG(INFO) << "MiniTrace: threads not stored " << threads_not_stored_.size();
     for (auto it : threads_not_stored_) {
       if (threads_stored_.find(it) == threads_stored_.end()) {
         threads_stored_.insert(it);
