@@ -137,7 +137,7 @@ static int read_with_timeout (int socket_fd, void *buf, int size, int timeout_se
   return total_written;
 }
 
-static bool CreateSocketAndCheckUIDAndPrefix(void *buf, int uid) {
+static bool CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid) {
   int socket_fd;
   sockaddr_un server_addr;
   if ((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
@@ -157,13 +157,13 @@ static bool CreateSocketAndCheckUIDAndPrefix(void *buf, int uid) {
   }
   LOG(INFO) << "MiniTrace: connect success!";
 
-  int16_t targetuid;
+  uid_t targetuid;
   int32_t prefix_length;
-  int written = read_with_timeout(socket_fd, &targetuid, 2, 3);
-  if (written == 2) {
+  int written = read_with_timeout(socket_fd, &targetuid, sizeof (uid_t), 3);
+  if (written == sizeof (uid_t)) {
     // check uid
     LOG(INFO) << "MiniTrace: read success, written " << written << " targetuid " << targetuid << " uid " << (uid&0xFFFF);
-    if (targetuid == (uid & 0xFFFF)) {
+    if (targetuid == uid) {
       int32_t pid = getpid();
       int32_t SPECIAL_VALUE = 0x7415963;
       write(socket_fd, &pid, 4);
@@ -217,12 +217,12 @@ bool MiniTrace::CreateSocketAndAlertTheEnd(
   }
   LOG(INFO) << "MiniTrace: connect success!";
 
-  int16_t targetuid;
-  int written = read_with_timeout(socket_fd, &targetuid, 2, 3);
-  if (written == 2) {
+  uid_t targetuid;
+  int written = read_with_timeout(socket_fd, &targetuid, sizeof (uid_t), 3);
+  if (written == sizeof (uid_t)) {
     // check uid
     LOG(INFO) << "MiniTrace: read success on uid " << getuid();
-    if (targetuid == ((int32_t) getuid() & 0xFFFF)) {
+    if (targetuid == getuid()) {
       int32_t pid = getpid();
       int32_t SPECIAL_VALUE = 0xDEAD;
       write(socket_fd, &pid, 4);
@@ -239,7 +239,7 @@ bool MiniTrace::CreateSocketAndAlertTheEnd(
       close(socket_fd);
       return true;
     } else {
-      PLOG(INFO) << "MiniTrace: Mismatch UID " << targetuid << " != " << (getuid() & 0xFFFF);
+      PLOG(INFO) << "MiniTrace: Mismatch UID " << targetuid << " != " << getuid();
     }
   } else {
     PLOG(ERROR) << "MiniTrace: Read UID " << errno;
@@ -249,7 +249,7 @@ bool MiniTrace::CreateSocketAndAlertTheEnd(
 }
 
 void MiniTrace::Start(bool force_start) {
-  int uid = getuid();
+  uid_t uid = getuid();
   if ((uid % AID_USER) < AID_APP) {
     // Do not target system app
     return;
@@ -265,7 +265,7 @@ void MiniTrace::Start(bool force_start) {
   }
 
   char buf[100];
-  if (!CreateSocketAndCheckUIDAndPrefix(buf, getuid())) {
+  if (!CreateSocketAndCheckUIDAndPrefix(buf, uid)) {
     return;
   }
   LOG(INFO) << "MiniTrace: uid found!! with name " << buf;
