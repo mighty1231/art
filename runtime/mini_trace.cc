@@ -84,7 +84,7 @@ static uint16_t GetRecordSize(MiniTraceAction action) {
     case kMiniTraceMonitorExit:
       return 10;
     default:
-      UNIMPLEMENTED(FATAL) << "Unexpected action: " << action;
+      UNIMPLEMENTED(FATAL) << "MiniTrace: Unexpected action: " << action;
   }
   return 0;
 }
@@ -328,7 +328,7 @@ void MiniTrace::Start(bool force_start) {
   {
     MutexLock mu(self, *Locks::trace_lock_);
     if (the_trace_ != NULL) {
-      LOG(ERROR) << "Trace already in progress, ignoring this request";
+      LOG(ERROR) << "MiniTrace: Trace already in progress, ignoring this request";
     } else {
       if (events == 0) {  // Do everything we can if there is no events
         events = instrumentation::Instrumentation::kMethodEntered |
@@ -362,7 +362,7 @@ void MiniTrace::Stop() {
   {
     MutexLock mu(Thread::Current(), *Locks::trace_lock_);
     if (the_trace_ == NULL) {
-      LOG(ERROR) << "Trace stop requested, but no trace currently running";
+      LOG(ERROR) << "MiniTrace: Trace stop requested, but no trace currently running";
     } else {
       the_trace = the_trace_;
       the_trace_ = NULL;
@@ -438,8 +438,8 @@ void MiniTrace::Stop() {
 }
 
 void MiniTrace::Shutdown() {
-  LOG(INFO) << "MiniTrace: Shutdown...";
   if (GetMethodTracingMode() != kTracingInactive) {
+    LOG(INFO) << "MiniTrace: Shutdown...";
     Stop();
   }
 }
@@ -488,7 +488,7 @@ void MiniTrace::FinishTracing() {
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
                        mirror::ArtMethod* method, uint32_t new_dex_pc) {
   // We're not recorded to listen to this kind of event, so complain.
-  LOG(ERROR) << "Unexpected dex PC event in tracing " << PrettyMethod(method) << " " << new_dex_pc;
+  LOG(ERROR) << "MiniTrace: Unexpected dex PC event in tracing " << PrettyMethod(method) << " " << new_dex_pc;
 };
 
 void MiniTrace::FieldRead(Thread* thread, mirror::Object* this_object,
@@ -605,7 +605,7 @@ bool MiniTrace::FlushBuffer() {
   int32_t cur_offset = cur_offset_.LoadRelaxed();
 
   if (!trace_data_file_->WriteFully(buf_.get(), cur_offset)) {
-    std::string detail(StringPrintf("Trace data write failed: %s", strerror(errno)));
+    std::string detail(StringPrintf("MiniTrace: Trace data write failed: %s", strerror(errno)));
     PLOG(ERROR) << detail;
     return false;
   }
@@ -638,7 +638,7 @@ bool MiniTrace::FlushBuffer() {
         length = aid >> 3;
         break;
       default:
-        UNIMPLEMENTED(FATAL) << "Unexpected action: " << action;
+        UNIMPLEMENTED(FATAL) << "MiniTrace: Unexpected action: " << action;
     }
     ptr += length;
   }
@@ -652,7 +652,7 @@ bool MiniTrace::FlushBuffer() {
     }
     std::string buf(os.str());
     if (!trace_method_info_file_->WriteFully(buf.c_str(), buf.length())) {
-      std::string detail(StringPrintf("Trace method info write failed: %s", strerror(errno)));
+      std::string detail(StringPrintf("MiniTrace: Trace method info write failed: %s", strerror(errno)));
       PLOG(ERROR) << detail;
       ThrowRuntimeException("%s", detail.c_str());
     }
@@ -670,7 +670,7 @@ bool MiniTrace::FlushBuffer() {
     }
     std::string buf(os.str());
     if (!trace_field_info_file_->WriteFully(buf.c_str(), buf.length())) {
-      std::string detail(StringPrintf("Trace field info write failed: %s", strerror(errno)));
+      std::string detail(StringPrintf("MiniTrace: Trace field info write failed: %s", strerror(errno)));
       PLOG(ERROR) << detail;
       ThrowRuntimeException("%s", detail.c_str());
     }
@@ -693,7 +693,7 @@ bool MiniTrace::FlushBuffer() {
     }
     std::string buf(os.str());
     if (!trace_thread_info_file_->WriteFully(buf.c_str(), buf.length())) {
-      std::string detail(StringPrintf("Trace thread info write failed: %s", strerror(errno)));
+      std::string detail(StringPrintf("MiniTrace: Trace thread info write failed: %s", strerror(errno)));
       PLOG(ERROR) << detail;
       ThrowRuntimeException("%s", detail.c_str());
     }
@@ -719,7 +719,7 @@ void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, u
       action = kMiniTraceUnroll;
       break;
     default:
-      UNIMPLEMENTED(FATAL) << "Unexpected event: " << event;
+      UNIMPLEMENTED(FATAL) << "MiniTrace: Unexpected event: " << event;
   }
 
   // Advance cur_offset_ atomically.
