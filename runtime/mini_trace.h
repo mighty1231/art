@@ -134,7 +134,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
  private:
   explicit MiniTrace(File *trace_method_info_file, File *trace_field_info_file,
                      File *trace_thread_info_file, File* trace_data_file,
-                     uint32_t events, int buffer_size);
+                     std::string prefix, uint32_t events, int buffer_size);
 
   void FinishTracing() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
@@ -184,6 +184,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   // File for log trace data
   std::unique_ptr<File> trace_data_file_;
+
+  // Prefix for log info and data
+  std::string prefix_;
 
   // Buffer to store trace data.
   std::unique_ptr<uint8_t> buf_;

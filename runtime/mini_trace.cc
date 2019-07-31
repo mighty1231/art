@@ -344,6 +344,7 @@ void MiniTrace::Start(bool force_start) {
                                  trace_field_info_file.release(),
                                  trace_thread_info_file.release(),
                                  trace_data_file.release(),
+                                 trace_log_prefix,
                                  events,
                                  buffer_size);
 
@@ -466,15 +467,13 @@ TracingMode MiniTrace::GetMethodTracingMode() {
 
 MiniTrace::MiniTrace(File *trace_method_info_file, File *trace_field_info_file,
       File *trace_thread_info_file, File* trace_data_file,
-      uint32_t events, int buffer_size)
+      std::string prefix, uint32_t events, int buffer_size)
     : trace_method_info_file_(trace_method_info_file),
       trace_field_info_file_(trace_field_info_file),
       trace_thread_info_file_(trace_thread_info_file),
       trace_data_file_(trace_data_file),
+      prefix_(prefix),
       buf_(new uint8_t[buffer_size]()), 
-      // methods_not_stored_(new uint8_t[buffer_size]()), ??
-      // fields_not_stored_(new uint8_t[buffer_size]()),??
-      // threads_not_stored_(), ??
       cur_offset_(0),
       events_(events), do_coverage_((events & kDoCoverage) != 0),
       do_filter_((events & kDoFilter) != 0), buffer_size_(buffer_size), start_time_(MicroTime()),
@@ -600,7 +599,7 @@ static void DumpThread(Thread* t, void* arg) {
 }
 
 bool MiniTrace::FlushBuffer() {
-  LOG(INFO) << "MiniTrace: FlushBuffer called";
+  LOG(INFO) << "MiniTrace: FlushBuffer, prefix=" << prefix_;
 
   int32_t cur_offset = cur_offset_.LoadRelaxed();
 
