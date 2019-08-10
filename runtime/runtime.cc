@@ -568,7 +568,7 @@ void Runtime::StartMiniTrace() {
     return;
   }
 
-  MiniTrace::Start(false);
+  MiniTrace::Start();
 }
 
 bool Runtime::IsShuttingDown(Thread* self) {

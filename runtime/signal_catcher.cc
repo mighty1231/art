@@ -173,7 +173,7 @@ void SignalCatcher::HandleSigUsr1() {
 }
 
 void SignalCatcher::HandleSigUsr2() {
-  MiniTrace::Toggle();
+  MiniTrace::Checkout();
 }
 
 int SignalCatcher::WaitForSignal(Thread* self, SignalSet& signals) {

@@ -24,15 +24,22 @@
 #include <vector>
 #include <queue>
 #include <unordered_map>
+#include <pthread.h>
 
 #include "atomic.h"
 #include "base/macros.h"
 #include "base/stringpiece.h"
 #include "globals.h"
+#include "dex_file-inl.h"
 #include "instrumentation.h"
+#include "mirror/art_method-inl.h"
+#include "mirror/class-inl.h"
+#include "mirror/dex_cache.h"
 #include "trace.h"
 #include "os.h"
 #include "safe_map.h"
+#include "ringbuf.h"
+#include "base/mutex.h"
 
 namespace art {
 
@@ -60,7 +67,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   };
 
  public:
-  static void Start(bool force_start = false)
+  static void Start()
       LOCKS_EXCLUDED(Locks::mutator_lock_,
                      Locks::thread_list_lock_,
                      Locks::thread_suspend_count_lock_,
@@ -71,7 +78,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
                      Locks::trace_lock_);
   static void Shutdown() LOCKS_EXCLUDED(Locks::trace_lock_);
 
-  static void Toggle() LOCKS_EXCLUDED(Locks::trace_lock_);
+  static void Checkout() LOCKS_EXCLUDED(Locks::trace_lock_);
 
   static TracingMode GetMethodTracingMode() LOCKS_EXCLUDED(Locks::trace_lock_);
 
@@ -118,25 +125,88 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   static void StoreExitingThreadInfo(Thread* thread);
 
-  struct tn_compare_ {
-    bool operator() (const std::pair<pid_t, std::string> &a,
-          const std::pair<pid_t, std::string> &b) {
-        if (a.first == b.first) {
-          return a.second.compare(b.second);
-        } else {
-          return a.first > b.first;
-        }
+  static void *ConsumerFunction(void *mt_object);
+
+
+  class ArtMethodDetail {
+  public:
+    ArtMethodDetail(mirror::ArtMethod* method) : method_(method),
+        classDescriptor_(method->GetDeclaringClassDescriptor()),
+        name_(method->GetName()), signature_(method->GetSignature().ToString()),
+        declaringClassSourceFile_(method->GetDeclaringClassSourceFile()) {
+
+    // if (method->GetDeclaringClassDescriptor() == NULL || 
+    //       method->GetDeclaringClassSourceFile() == NULL) {
+    //   LOG(ERROR) << "MiniTrace: Not expected on LogNewMethod";
+    //   methods_not_stored_.emplace_back(
+    //     method,
+    //     "UnknownDescriptor",
+    //     method->GetName(),
+    //     "UnknownSignature",
+    //     "UnknownDeclaringClassSourceFile"
+    //   );
       }
+    bool operator< (const ArtMethodDetail *other) const {
+      return this->method_ < other->method_;
+    }
+    void Dump(std::ostringstream &os) {
+      os << StringPrintf("%p\t%s\t%s\t%s\t%s\n", method_,
+        classDescriptor_.c_str(),
+        name_.c_str(),
+        signature_.c_str(),
+        declaringClassSourceFile_.c_str());
+    }
+  private:
+    mirror::ArtMethod* method_;
+    std::string classDescriptor_;
+    std::string name_;
+    std::string signature_;
+    std::string declaringClassSourceFile_;
   };
 
-  typedef std::set<std::pair<pid_t, std::string>, tn_compare_> tn_type;
+  class ArtFieldDetail {
+  public:
+    ArtFieldDetail(mirror::ArtField *field) : field_(field),
+        name_(field->GetName()), typeDesc_(field->GetTypeDescriptor()) {
+      const DexFile* dex_file = field->GetDexFile();
+      const DexFile::FieldId& field_id = dex_file->GetFieldId(field->GetDexFieldIndex());
+      classDescriptor_.assign(PrettyDescriptor(dex_file->GetFieldDeclaringClassDescriptor(field_id)));
+    }
+    bool operator< (const ArtFieldDetail *other) const {
+      return this->field_ < other->field_;
+    }
+    void Dump(std::ostringstream &os) {
+      os << StringPrintf("%p\t%s\t%s\t%s\n", field_,
+        classDescriptor_.c_str(), name_.c_str(), typeDesc_.c_str());
+    }
+  private:
+    mirror::ArtField* field_;
+    std::string classDescriptor_;
+    std::string name_;
+    std::string typeDesc_;
+  };
+
+  class ThreadDetail {
+  public:
+    ThreadDetail(pid_t pid, std::string name): pid_(pid), name_(name) {}
+    bool operator< (const ThreadDetail *other) const {
+      if (this->pid_ == other->pid_)
+        return this->name_.compare(other->name_);
+      else
+        return this->pid_ < other->pid_;
+    }
+    void Dump(std::ostringstream &os) {
+      os << pid_ << '\t' << name_ << '\n';
+    }
+  private:
+    pid_t pid_;
+    std::string name_;
+  };
 
  private:
   explicit MiniTrace(File *trace_method_info_file, File *trace_field_info_file,
                      File *trace_thread_info_file, File* trace_data_file,
-                     std::string prefix, uint32_t events, int buffer_size);
-
-  void FinishTracing() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+                     std::string prefix, uint32_t events, uint32_t buffer_size);
 
   void LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
                            instrumentation::Instrumentation::InstrumentationEvent event)
@@ -152,12 +222,11 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   bool HandleOverflow() LOCKS_EXCLUDED(Locks::trace_lock_) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  bool FlushBuffer() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void FlushMethod(std::ostringstream &os); // SHARED_LOCKS_REQUIRED(this->traced_method_lock_)
+  void FlushField(std::ostringstream &os); // SHARED_LOCKS_REQUIRED(this->traced_field_lock_)
+  void FlushThread(std::ostringstream &os); // SHARED_LOCKS_REQUIRED(this->traced_thread_lock_)
 
-  void DumpMethodList(std::ostream& os) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void DumpFieldList(std::ostream& os) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void DumpExecutionData(std::ostream& os) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void DumpThreadList(std::ostream& os) LOCKS_EXCLUDED(Locks::thread_list_lock_);
+  bool waitingConsume;
 
   bool CreateSocketAndAlertTheEnd(
       const std::string &trace_method_info_filename,
@@ -166,9 +235,12 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       const std::string &trace_data_filename
     );
 
-  void LogNewMethod(mirror::ArtMethod *method);
+  void LogNewMethod(mirror::ArtMethod *method) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   void LogNewField(mirror::ArtField *field);
   void LogNewThread(Thread *thread);
+
+  void ReadBuffer(char *dest, size_t offset, size_t len);
+  void WriteBuffer(const char *src, size_t offset, size_t len);
 
   // Singleton instance of the Trace or NULL when no method tracing is active.
   static MiniTrace* volatile the_trace_ GUARDED_BY(Locks::trace_lock_);
@@ -191,20 +263,39 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   // Buffer to store trace data.
   std::unique_ptr<uint8_t> buf_;
 
+  // manages buf, as ring buffer
+  ringbuf_t *ringbuf_;
+
+  // Manages all threads and ringbuf workers
+  Mutex *registered_threads_lock_;
+  std::map<Thread *, ringbuf_worker_t *> registered_threads_;
+
+  // Used for consumer - MiniTrace synchronization
+  pthread_t consumer_thread_;
+  volatile bool consumer_runs_;
+
+  // Exclusive call on Start, Stop, Checkout
+  // @TODO Stop and Checkout
+  Mutex *on_change_;
+
+  ringbuf_worker_t *GetRingBufWorker();
+  void UnregisterRingBufWorker(Thread *thread);
+
   // Buffer to store trace method data.
-  std::list<mirror::ArtMethod*> methods_not_stored_;
+  std::list<ArtMethodDetail> methods_not_stored_;
+
+  // Visited methods
+  std::set<mirror::ArtMethod*> visited_methods_;
 
   // Buffer to store trace field data.
-  std::list<mirror::ArtField*> fields_not_stored_;
+  std::list<ArtFieldDetail> fields_not_stored_;
+
+  // Visited fields
+  std::set<mirror::ArtField*> visited_fields_;
 
   // Buffer to store thread data
-  tn_type threads_stored_;
-
-  // Buffer to store thread data
-  tn_type threads_not_stored_;
-
-  // Offset into buf_.
-  AtomicInteger cur_offset_;
+  // Stored threads are accessible with registered_threads_
+  std::list<ThreadDetail> threads_not_stored_;
 
   // Events, default open every available events.
   uint32_t events_;
@@ -215,26 +306,19 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   // Filter library code
   bool do_filter_;
 
-  // Size of buf_.
-  const int buffer_size_;
+  const uint32_t buffer_size_;
 
   // Time trace was created.
   const uint64_t start_time_;
 
-  // Overflow counter
-  int buffer_overflow_count_;
-
-  // Visited methods
-  std::set<mirror::ArtMethod*> visited_methods_;
-
-  // Visited fields
-  std::set<mirror::ArtField*> visited_fields_;
-
-  // Map of thread ids and names that have already exited.
-  SafeMap<pid_t, std::string> exited_threads_;
-
   // Method Execution Data
   SafeMap<mirror::ArtMethod*, bool*> execution_data_;
+
+  Mutex *traced_method_lock_;
+
+  Mutex *traced_field_lock_;
+
+  Mutex *traced_thread_lock_;
 
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
 };
