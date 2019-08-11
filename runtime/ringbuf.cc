@@ -65,8 +65,8 @@
 #include <limits.h>
 #include <errno.h>
 
+#include "utils.h"
 #include "ringbuf.h"
-// #include "utils.h" // @TODO if compile error, add utils.h
 
 #define RBUF_OFF_MASK   (0x00ffffffUL)
 #define WRAP_LOCK_BIT   (0x80000000UL)
@@ -387,6 +387,16 @@ ringbuf_release(ringbuf_t *rbuf, size_t nbytes)
     ASSERT(nwritten <= rbuf->space);
 
     rbuf->written = (nwritten == rbuf->space) ? 0 : nwritten;
+}
+
+/*
+ * ringbuf_w2i: worker to its index
+ */
+size_t
+ringbuf_w2i(ringbuf_t *rbuf, ringbuf_worker_t *worker) {
+    const uint32_t wptr = PointerToLowMemUInt32(worker);
+    const uint32_t rptr = PointerToLowMemUInt32(rbuf);
+    return (wptr - offsetof(ringbuf_t , workers) - rptr) / sizeof(ringbuf_worker_t);
 }
 
 }  // namespace art

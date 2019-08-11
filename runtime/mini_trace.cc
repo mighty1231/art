@@ -44,8 +44,6 @@
 #include <endian.h>
 #include "ringbuf.h"
 
-#define MAX_THREAD_COUNT 64
-
 namespace art {
 
 enum MiniTraceAction {
@@ -255,6 +253,29 @@ void MiniTrace::WriteBuffer(const char *src, size_t offset, size_t len) {
   }
 }
 
+bool MiniTrace::Setup(const char *file_prefix) {
+  Thread *self = Thread::Current();
+  MutexLock mu(self, *on_change_);
+  if (trace_method_info_file_ != NULL || trace_field_info_file_ != NULL ||
+    trace_thread_info_file_ != NULL || trace_data_file_ != NULL) {
+    return false;
+  }
+
+  trace_method_info_file_ = OS::CreateEmptyFile(StringPrintf("%sinfo_m.log", file_prefix).c_str());
+  CHECK(trace_method_info_file_ != NULL);
+
+  trace_field_info_file_ = OS::CreateEmptyFile(StringPrintf("%sinfo_f.log", file_prefix).c_str());
+  CHECK(trace_field_info_file_ != NULL);
+
+  trace_thread_info_file_ = OS::CreateEmptyFile(StringPrintf("%sinfo_t.log", file_prefix).c_str());
+  CHECK(trace_thread_info_file_ != NULL);
+
+  trace_data_file_ = OS::CreateEmptyFile(StringPrintf("%sdata.bin", file_prefix).c_str());
+  CHECK(trace_data_file_ != NULL);
+
+  return true;
+}
+
 void MiniTrace::Start() {
   uid_t uid = getuid();
   if ((uid % AID_USER) < AID_APP) {
@@ -262,104 +283,33 @@ void MiniTrace::Start() {
     return;
   }
 
+  static const uint32_t events = instrumentation::Instrumentation::kMethodEntered |
+                                 instrumentation::Instrumentation::kMethodExited |
+                                 instrumentation::Instrumentation::kMethodUnwind |
+                                 instrumentation::Instrumentation::kFieldRead |
+                                 instrumentation::Instrumentation::kFieldWritten |
+                                 instrumentation::Instrumentation::kExceptionCaught |
+                                 kDoCoverage;
+  char prefix[100];
   Thread* self = Thread::Current();
+  MiniTrace *the_trace;
   {
     MutexLock mu(self, *Locks::trace_lock_);
-    if (the_trace_ != NULL) {
-      LOG(ERROR) << "MiniTrace: Trace already in progress, ignoring this request";
+    if (the_trace_ != NULL)
       return;
-    }
+    else if (!CreateSocketAndCheckUIDAndPrefix(prefix, uid))
+      return;
+    LOG(INFO) << "MiniTrace: Connection with server was success, received prefix " << prefix;
+    the_trace = the_trace_ = new MiniTrace(events, 1024 * 1024);
   }
-
-  char buf[100];
-  if (!CreateSocketAndCheckUIDAndPrefix(buf, uid)) {
-    return;
-  }
-  LOG(INFO) << "MiniTrace: uid found!! with name " << buf;
-
-  std::string trace_log_prefix;
-  trace_log_prefix.assign(buf);
-
-  uint32_t events = 0;
-
-  std::unique_ptr<File> trace_method_info_file;
-  std::unique_ptr<File> trace_field_info_file;
-  std::unique_ptr<File> trace_thread_info_file;
-  {
-    std::ostringstream os;
-    os << trace_log_prefix << "info_m.log";
-    std::string trace_method_info_filename(os.str());
-    trace_method_info_file.reset(OS::CreateEmptyFile(trace_method_info_filename.c_str()));
-    if (trace_method_info_file.get() == NULL) {
-      LOG(INFO) << "MiniTrace: Unable to open method info file '" << trace_method_info_filename << "'";
-      return;
-    }
-
-    os.str("");
-    os << trace_log_prefix << "info_f.log";
-    std::string trace_field_info_filename(os.str());
-    trace_field_info_file.reset(OS::CreateEmptyFile(trace_field_info_filename.c_str()));
-    if (trace_field_info_file.get() == NULL) {
-      LOG(INFO) << "MiniTrace: Unable to open field info file '" << trace_field_info_filename << "'";
-      return;
-    }
-
-    os.str("");
-    os << trace_log_prefix << "info_t.log";
-    std::string trace_thread_info_filename(os.str());
-    trace_thread_info_file.reset(OS::CreateEmptyFile(trace_thread_info_filename.c_str()));
-    if (trace_thread_info_file.get() == NULL) {
-      LOG(INFO) << "MiniTrace: Unable to open thread info file '" << trace_thread_info_filename << "'";
-      return;
-    }
-  }
-
-  std::unique_ptr<File> trace_data_file;
-  {
-    std::ostringstream os;
-    os << trace_log_prefix << "data.bin";
-    std::string trace_data_filename(os.str());
-    trace_data_file.reset(OS::CreateEmptyFile(trace_data_filename.c_str()));
-    if (trace_data_file.get() == NULL) {
-      LOG(INFO) << "MiniTrace: Unable to open trace data file '" << trace_data_filename << "'";
-      return;
-    }
-  }
-
   Runtime* runtime = Runtime::Current();
-
   runtime->GetThreadList()->SuspendAll();
 
-  // Create Trace object.
-  {
-    MutexLock mu(self, *Locks::trace_lock_);
-    if (the_trace_ != NULL) {
-      LOG(ERROR) << "MiniTrace: Trace already in progress, ignoring this request";
-    } else {
-      if (events == 0) {  // Do everything we can if there is no events
-        events = instrumentation::Instrumentation::kMethodEntered |
-                 instrumentation::Instrumentation::kMethodExited |
-                 instrumentation::Instrumentation::kMethodUnwind |
-                 instrumentation::Instrumentation::kFieldRead |
-                 instrumentation::Instrumentation::kFieldWritten |
-                 instrumentation::Instrumentation::kExceptionCaught |
-                 kDoCoverage;
-      }
-
-      the_trace_ = new MiniTrace(trace_method_info_file.release(),
-                                 trace_field_info_file.release(),
-                                 trace_thread_info_file.release(),
-                                 trace_data_file.release(),
-                                 trace_log_prefix,
-                                 events,
-                                 1024 * 1024);
-
-      runtime->GetInstrumentation()->AddListener(the_trace_, events);
-      runtime->GetInstrumentation()->EnableMethodTracing();
-    }
-  }
-
+  runtime->GetInstrumentation()->AddListener(the_trace, events);
+  runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
+
+  the_trace->Setup(prefix);
 }
 
 void MiniTrace::Stop() {
@@ -392,28 +342,28 @@ void MiniTrace::Stop() {
     std::string trace_thread_info_filename(the_trace->trace_thread_info_file_->GetPath());
     std::string trace_data_filename(the_trace->trace_data_file_->GetPath());
 
-    if (the_trace->trace_method_info_file_.get() != nullptr) {
+    if (the_trace->trace_method_info_file_ != nullptr) {
       // Do not try to erase, so flush and close explicitly.
       if (the_trace->trace_method_info_file_->Flush() != 0)
         PLOG(ERROR) << "MiniTrace: Could not flush method info file.";
       if (the_trace->trace_method_info_file_->Close() != 0)
         PLOG(ERROR) << "MiniTrace: Could not close method info file.";
     }
-    if (the_trace->trace_field_info_file_.get() != nullptr) {
+    if (the_trace->trace_field_info_file_ != nullptr) {
       // Do not try to erase, so flush and close explicitly.
       if (the_trace->trace_field_info_file_->Flush() != 0)
         PLOG(ERROR) << "MiniTrace: Could not flush field info file.";
       if (the_trace->trace_field_info_file_->Close() != 0)
         PLOG(ERROR) << "MiniTrace: Could not close field info file.";
     }
-    if (the_trace->trace_thread_info_file_.get() != nullptr) {
+    if (the_trace->trace_thread_info_file_ != nullptr) {
       // Do not try to erase, so flush and close explicitly.
       if (the_trace->trace_thread_info_file_->Flush() != 0)
         PLOG(ERROR) << "MiniTrace: Could not flush thread info file.";
       if (the_trace->trace_thread_info_file_->Close() != 0)
         PLOG(ERROR) << "MiniTrace: Could not close thread info file.";
     }
-    if (the_trace->trace_data_file_.get() != nullptr) {
+    if (the_trace->trace_data_file_ != nullptr) {
       // Do not try to erase, so flush and close explicitly.
       if (the_trace->trace_data_file_->Flush() != 0)
         PLOG(ERROR) << "MiniTrace: Could not flush trace data file.";
@@ -430,6 +380,7 @@ void MiniTrace::Stop() {
       LOG(ERROR) << "MiniTrace: Alerting the end failed.";
     }
 
+    delete the_trace->registered_threads_lock_;
     delete the_trace->traced_method_lock_;
     delete the_trace->traced_field_lock_;
     delete the_trace->traced_thread_lock_;
@@ -536,11 +487,26 @@ void MiniTrace::Checkout() {
         Locks::mutator_lock_->ExclusiveUnlock(self);
       }
     }
+    CHECK(the_trace->trace_data_file_->Close());
+    CHECK(the_trace->trace_method_info_file_->Close());
+    CHECK(the_trace->trace_field_info_file_->Close());
+    CHECK(the_trace->trace_thread_info_file_->Close());
+    the_trace->trace_data_file_ = NULL;
+    the_trace->trace_method_info_file_ = NULL;
+    the_trace->trace_field_info_file_ = NULL;
+    the_trace->trace_thread_info_file_ = NULL;
+
+    char prefix[100];
+    if(!CreateSocketAndCheckUIDAndPrefix(prefix, getuid()) || !the_trace->Setup(prefix)) {
+      // @TODO server connection failed, so delete the trace...
+      return;
+    }
 
     // restart consumer
     CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
                                         the_trace),
                                         "Consumer thread");
+    the_trace->consumer_runs_ = true;
   }
 }
 
@@ -639,15 +605,8 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   return 0;
 }
 
-MiniTrace::MiniTrace(File *trace_method_info_file, File *trace_field_info_file,
-      File *trace_thread_info_file, File* trace_data_file,
-      std::string prefix, uint32_t events, uint32_t buffer_size)
-    : trace_method_info_file_(trace_method_info_file),
-      trace_field_info_file_(trace_field_info_file),
-      trace_thread_info_file_(trace_thread_info_file),
-      trace_data_file_(trace_data_file),
-      prefix_(prefix),
-      buf_(new uint8_t[buffer_size]()),
+MiniTrace::MiniTrace(uint32_t events, uint32_t buffer_size)
+    : buf_(new uint8_t[buffer_size]()),
       consumer_runs_(true),
       on_change_(new Mutex("MiniTrace main status lock")),
       events_(events), do_coverage_((events & kDoCoverage) != 0),
@@ -657,11 +616,15 @@ MiniTrace::MiniTrace(File *trace_method_info_file, File *trace_field_info_file,
   traced_field_lock_ = new Mutex("MiniTrace field lock");
   traced_thread_lock_ = new Mutex("MiniTrace thread lock");
 
+  registered_threads_lock_ = new Mutex("MiniTrace thread lock 2");
+
   size_t ringbuf_obj_size;
   ringbuf_get_sizes(MAX_THREAD_COUNT, &ringbuf_obj_size, NULL);
 
   ringbuf_ = (ringbuf_t *) malloc(ringbuf_obj_size);
   ringbuf_setup(ringbuf_, MAX_THREAD_COUNT, buffer_size);
+  for (int i=0; i<MAX_THREAD_COUNT; i++)
+    is_registered_[i] = false;
 
   CHECK_PTHREAD_CALL(pthread_create, (&consumer_thread_, NULL, &ConsumerFunction,
                                       this),
@@ -964,12 +927,12 @@ ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
   } else {
     // Not found
     // Find empty id
+    LOG(INFO) << "MiniTrace: Register ring buf worker with thread " << self->GetTid();
     MutexLock mu(self, *registered_threads_lock_);
     uint32_t empty_id;
     for (empty_id=0; empty_id<MAX_THREAD_COUNT; empty_id++) {
-      if (~ringbuf_->workers[empty_id].registered) {
+      if (is_registered_[empty_id] == false)
         break;
-      }
     }
     if (empty_id == MAX_THREAD_COUNT) {
       LOG(ERROR) << "MiniTrace: Failed to allocate new ringbuf worker";
@@ -977,6 +940,8 @@ ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
     }
 
     ringbuf_worker_t *rworker = ringbuf_register(ringbuf_, empty_id);
+    is_registered_[empty_id] = true;
+    LOG(INFO) << "MiniTrace: Assigining id " << empty_id << " and rworker " << rworker;
     registered_threads_[self] = rworker;
     self->SetRingBufWorker(rworker);
     std::string name;
@@ -1000,6 +965,7 @@ void MiniTrace::UnregisterRingBufWorker(Thread *thread) {
     } else {
       thread->SetRingBufWorker(NULL);
       ringbuf_unregister(ringbuf_, it->second);
+      is_registered_[ringbuf_w2i(ringbuf_, it->second)] = false;
       registered_threads_.erase(it);
     }
   }

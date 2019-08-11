@@ -113,6 +113,8 @@ void            ringbuf_produce(ringbuf_t *, ringbuf_worker_t *);
 size_t          ringbuf_consume(ringbuf_t *, size_t *);
 void            ringbuf_release(ringbuf_t *, size_t);
 
+size_t          ringbuf_w2i(ringbuf_t *, ringbuf_worker_t *);
+
 }
 
 #endif  // _RINGBUF_H_

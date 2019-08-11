@@ -41,6 +41,8 @@
 #include "ringbuf.h"
 #include "base/mutex.h"
 
+
+#define MAX_THREAD_COUNT 64
 namespace art {
 
 namespace mirror {
@@ -204,9 +206,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   };
 
  private:
-  explicit MiniTrace(File *trace_method_info_file, File *trace_field_info_file,
-                     File *trace_thread_info_file, File* trace_data_file,
-                     std::string prefix, uint32_t events, uint32_t buffer_size);
+  explicit MiniTrace(uint32_t events, uint32_t buffer_size);
+
+  bool Setup(const char *file_prefix);
 
   void LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
                            instrumentation::Instrumentation::InstrumentationEvent event)
@@ -220,13 +222,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
                            bool enter_event)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  bool HandleOverflow() LOCKS_EXCLUDED(Locks::trace_lock_) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
   void FlushMethod(std::ostringstream &os); // SHARED_LOCKS_REQUIRED(this->traced_method_lock_)
   void FlushField(std::ostringstream &os); // SHARED_LOCKS_REQUIRED(this->traced_field_lock_)
   void FlushThread(std::ostringstream &os); // SHARED_LOCKS_REQUIRED(this->traced_thread_lock_)
-
-  bool waitingConsume;
 
   bool CreateSocketAndAlertTheEnd(
       const std::string &trace_method_info_filename,
@@ -246,16 +244,16 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   static MiniTrace* volatile the_trace_ GUARDED_BY(Locks::trace_lock_);
 
   // File for log method info
-  std::unique_ptr<File> trace_method_info_file_;
+  File* trace_method_info_file_;
 
   // File for log field info
-  std::unique_ptr<File> trace_field_info_file_;
+  File* trace_field_info_file_;
 
   // File for log thread info
-  std::unique_ptr<File> trace_thread_info_file_;
+  File* trace_thread_info_file_;
 
   // File for log trace data
-  std::unique_ptr<File> trace_data_file_;
+  File* trace_data_file_;
 
   // Prefix for log info and data
   std::string prefix_;
@@ -269,12 +267,13 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   // Manages all threads and ringbuf workers
   Mutex *registered_threads_lock_;
   std::map<Thread *, ringbuf_worker_t *> registered_threads_;
+  bool is_registered_[MAX_THREAD_COUNT];
 
   // Used for consumer - MiniTrace synchronization
   pthread_t consumer_thread_;
   volatile bool consumer_runs_;
 
-  // Exclusive call on Start, Stop, Checkout
+  // Exclusive call on Setup, Stop, Checkout
   // @TODO Stop and Checkout
   Mutex *on_change_;
 
@@ -298,7 +297,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   std::list<ThreadDetail> threads_not_stored_;
 
   // Events, default open every available events.
-  uint32_t events_;
+  const uint32_t events_;
 
   // Log execution data
   bool do_coverage_;
