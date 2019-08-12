@@ -229,51 +229,26 @@ bool MiniTrace::CreateSocketAndAlertTheEnd(
 
 void MiniTrace::ReadBuffer(char *dest, size_t offset, size_t len) {
   // Must be called after ringbuf_consume
-  uint8_t *ptr = buf_.get();
   if (offset + len <= buffer_size_) {
-    memcpy(dest, ptr + offset, len);
+    memcpy(dest, buf_ + offset, len);
   } else {
     // wrap around
     size_t first_size = buffer_size_ - offset;
-    memcpy(dest, ptr + offset, first_size);
-    memcpy(dest + first_size, ptr, len - first_size);
+    memcpy(dest, buf_ + offset, first_size);
+    memcpy(dest + first_size, buf_, len - first_size);
   }
 }
 
 void MiniTrace::WriteBuffer(const char *src, size_t offset, size_t len) {
   // Must be called after ringbuf_acquire
-  uint8_t *ptr = buf_.get();
   if (offset + len <= buffer_size_) {
-    memcpy(ptr + offset, src, len);
+    memcpy(buf_ + offset, src, len);
   } else {
     // wrap around
     size_t first_size = buffer_size_ - offset;
-    memcpy(ptr + offset, src, first_size);
-    memcpy(ptr, src + first_size, len - first_size);
+    memcpy(buf_ + offset, src, first_size);
+    memcpy(buf_, src + first_size, len - first_size);
   }
-}
-
-bool MiniTrace::Setup(const char *file_prefix) {
-  Thread *self = Thread::Current();
-  MutexLock mu(self, *on_change_);
-  if (trace_method_info_file_ != NULL || trace_field_info_file_ != NULL ||
-    trace_thread_info_file_ != NULL || trace_data_file_ != NULL) {
-    return false;
-  }
-
-  trace_method_info_file_ = OS::CreateEmptyFile(StringPrintf("%sinfo_m.log", file_prefix).c_str());
-  CHECK(trace_method_info_file_ != NULL);
-
-  trace_field_info_file_ = OS::CreateEmptyFile(StringPrintf("%sinfo_f.log", file_prefix).c_str());
-  CHECK(trace_field_info_file_ != NULL);
-
-  trace_thread_info_file_ = OS::CreateEmptyFile(StringPrintf("%sinfo_t.log", file_prefix).c_str());
-  CHECK(trace_thread_info_file_ != NULL);
-
-  trace_data_file_ = OS::CreateEmptyFile(StringPrintf("%sdata.bin", file_prefix).c_str());
-  CHECK(trace_data_file_ != NULL);
-
-  return true;
 }
 
 void MiniTrace::Start() {
@@ -309,7 +284,10 @@ void MiniTrace::Start() {
   runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
 
-  the_trace->Setup(prefix);
+  the_trace->SetPrefix(prefix);
+  CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
+                                      the_trace),
+                                      "Consumer thread");
 }
 
 void MiniTrace::Stop() {
@@ -328,62 +306,14 @@ void MiniTrace::Stop() {
   }
   if (the_trace != NULL) {
     LOG(INFO) << "MiniTrace: Stop() called";
-    /* uint32_t events = instrumentation::Instrumentation::kMethodEntered |
-                      instrumentation::Instrumentation::kMethodExited |
-                      instrumentation::Instrumentation::kMethodUnwind |
-                      instrumentation::Instrumentation::kFieldRead |
-                      instrumentation::Instrumentation::kFieldWritten;*/
-
     runtime->GetInstrumentation()->DisableMethodTracing();
     runtime->GetInstrumentation()->RemoveListener(the_trace, the_trace->events_);
-
-    std::string trace_method_info_filename(the_trace->trace_method_info_file_->GetPath());
-    std::string trace_field_info_filename(the_trace->trace_field_info_file_->GetPath());
-    std::string trace_thread_info_filename(the_trace->trace_thread_info_file_->GetPath());
-    std::string trace_data_filename(the_trace->trace_data_file_->GetPath());
-
-    if (the_trace->trace_method_info_file_ != nullptr) {
-      // Do not try to erase, so flush and close explicitly.
-      if (the_trace->trace_method_info_file_->Flush() != 0)
-        PLOG(ERROR) << "MiniTrace: Could not flush method info file.";
-      if (the_trace->trace_method_info_file_->Close() != 0)
-        PLOG(ERROR) << "MiniTrace: Could not close method info file.";
-    }
-    if (the_trace->trace_field_info_file_ != nullptr) {
-      // Do not try to erase, so flush and close explicitly.
-      if (the_trace->trace_field_info_file_->Flush() != 0)
-        PLOG(ERROR) << "MiniTrace: Could not flush field info file.";
-      if (the_trace->trace_field_info_file_->Close() != 0)
-        PLOG(ERROR) << "MiniTrace: Could not close field info file.";
-    }
-    if (the_trace->trace_thread_info_file_ != nullptr) {
-      // Do not try to erase, so flush and close explicitly.
-      if (the_trace->trace_thread_info_file_->Flush() != 0)
-        PLOG(ERROR) << "MiniTrace: Could not flush thread info file.";
-      if (the_trace->trace_thread_info_file_->Close() != 0)
-        PLOG(ERROR) << "MiniTrace: Could not close thread info file.";
-    }
-    if (the_trace->trace_data_file_ != nullptr) {
-      // Do not try to erase, so flush and close explicitly.
-      if (the_trace->trace_data_file_->Flush() != 0)
-        PLOG(ERROR) << "MiniTrace: Could not flush trace data file.";
-      if (the_trace->trace_data_file_->Close() != 0)
-        PLOG(ERROR) << "MiniTrace: Could not close trace data file.";
-    }
-
-    if (!the_trace->CreateSocketAndAlertTheEnd(
-          trace_method_info_filename,
-          trace_field_info_filename,
-          trace_thread_info_filename,
-          trace_data_filename
-        )) {
-      LOG(ERROR) << "MiniTrace: Alerting the end failed.";
-    }
 
     delete the_trace->registered_threads_lock_;
     delete the_trace->traced_method_lock_;
     delete the_trace->traced_field_lock_;
     delete the_trace->traced_thread_lock_;
+    delete the_trace->buf_;
     free(the_trace->ringbuf_);
 
     delete the_trace;
@@ -419,88 +349,12 @@ void MiniTrace::Checkout() {
     CHECK_PTHREAD_CALL(pthread_join, (the_trace->consumer_thread_, NULL), 
         "consumer thread shutdown");
 
-    // Prevent Logging
-    MutexLock mu1(self, *the_trace->traced_method_lock_);
-    MutexLock mu2(self, *the_trace->traced_field_lock_);
-    MutexLock mu3(self, *the_trace->traced_thread_lock_);
-
-    // Flush remaining outputs
-    // Similar to consumer_func, but no lock
-    char databuf[the_trace->buffer_size_];
-    size_t len, woff;
-    // Dump Buffer
-    len = ringbuf_consume(the_trace->ringbuf_, &woff);
-    if (len > 0) {
-      the_trace->ReadBuffer(databuf, woff, len);
-      ringbuf_release(the_trace->ringbuf_, len);
-
-      // Save to data binary file
-      if (!the_trace->trace_data_file_->WriteFully(databuf, len)) {
-        std::string detail(StringPrintf("MiniTrace: Trace data write failed: %s", strerror(errno)));
-        PLOG(ERROR) << detail;
-        {
-          Locks::mutator_lock_->ExclusiveLock(self);
-          ThrowRuntimeException("%s", detail.c_str());
-          Locks::mutator_lock_->ExclusiveUnlock(self);
-        }
-      }
-    }
-
-    // Dump Method
-    std::ostringstream os;
-    the_trace->FlushMethod(os);
-    std::string buf(os.str());
-    if (!the_trace->trace_method_info_file_->WriteFully(buf.c_str(), buf.length())) {
-      std::string detail(StringPrintf("MiniTrace: Trace method info write failed: %s", strerror(errno)));
-      PLOG(ERROR) << detail;
-      {
-        Locks::mutator_lock_->ExclusiveLock(self);
-        ThrowRuntimeException("%s", detail.c_str());
-        Locks::mutator_lock_->ExclusiveUnlock(self);
-      }
-    }
-
-    // Dump Field
-    os.str("");
-    the_trace->FlushField(os);
-    buf.assign(os.str());
-    if (!the_trace->trace_field_info_file_->WriteFully(buf.c_str(), buf.length())) {
-      std::string detail(StringPrintf("MiniTrace: Trace field info write failed: %s", strerror(errno)));
-      PLOG(ERROR) << detail;
-      {
-        Locks::mutator_lock_->ExclusiveLock(self);
-        ThrowRuntimeException("%s", detail.c_str());
-        Locks::mutator_lock_->ExclusiveUnlock(self);
-      }
-    }
-
-    // Dump Thread
-    os.str("");
-    the_trace->FlushThread(os);
-    buf.assign(os.str());
-    if (!the_trace->trace_thread_info_file_->WriteFully(buf.c_str(), buf.length())) {
-      std::string detail(StringPrintf("MiniTrace: Trace thread info write failed: %s", strerror(errno)));
-      PLOG(ERROR) << detail;
-      {
-        Locks::mutator_lock_->ExclusiveLock(self);
-        ThrowRuntimeException("%s", detail.c_str());
-        Locks::mutator_lock_->ExclusiveUnlock(self);
-      }
-    }
-    CHECK(the_trace->trace_data_file_->Close());
-    CHECK(the_trace->trace_method_info_file_->Close());
-    CHECK(the_trace->trace_field_info_file_->Close());
-    CHECK(the_trace->trace_thread_info_file_->Close());
-    the_trace->trace_data_file_ = NULL;
-    the_trace->trace_method_info_file_ = NULL;
-    the_trace->trace_field_info_file_ = NULL;
-    the_trace->trace_thread_info_file_ = NULL;
-
     char prefix[100];
-    if(!CreateSocketAndCheckUIDAndPrefix(prefix, getuid()) || !the_trace->Setup(prefix)) {
+    if(!CreateSocketAndCheckUIDAndPrefix(prefix, getuid())) {
       // @TODO server connection failed, so delete the trace...
       return;
     }
+    the_trace->SetPrefix(prefix);
 
     // restart consumer
     CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
@@ -521,15 +375,35 @@ TracingMode MiniTrace::GetMethodTracingMode() {
 }
 
 void *MiniTrace::ConsumerFunction(void *arg) {
-  Runtime* runtime = Runtime::Current();
   MiniTrace *the_trace = (MiniTrace *)arg;
-  Thread *self = Thread::Current();
-
+  Runtime* runtime = Runtime::Current();
   CHECK(runtime->AttachCurrentThread("Consumer", true, runtime->GetSystemThreadGroup(),
-                                     !runtime->IsCompiler()));
+                                       !runtime->IsCompiler()));
 
-  char databuf[the_trace->buffer_size_];
+  Thread *self = Thread::Current();
+  LOG(INFO) << "MiniTrace: Consumer registered with tid " << self->GetTid();
+
+  // Create empty file to log data
+  std::string trace_data_filename(StringPrintf("%sdata.bin", the_trace->prefix_));
+  std::string trace_method_info_filename(StringPrintf("%sinfo_m.log", the_trace->prefix_));
+  std::string trace_field_info_filename(StringPrintf("%sinfo_f.log", the_trace->prefix_));
+  std::string trace_thread_info_filename(StringPrintf("%sinfo_t.log", the_trace->prefix_));
+
+  File *trace_data_file_ = OS::CreateEmptyFile(trace_data_filename.c_str());
+  CHECK(trace_data_file_ != NULL);
+
+  File *trace_method_info_file_ = OS::CreateEmptyFile(trace_method_info_filename.c_str());
+  CHECK(trace_method_info_file_ != NULL);
+
+  File *trace_field_info_file_ = OS::CreateEmptyFile(trace_field_info_filename.c_str());
+  CHECK(trace_field_info_file_ != NULL);
+
+  File *trace_thread_info_file_ = OS::CreateEmptyFile(trace_thread_info_filename.c_str());
+  CHECK(trace_thread_info_file_ != NULL);
+
+  char *databuf = new char[the_trace->buffer_size_];
   size_t len, woff;
+  std::string buffer;
   while (the_trace->consumer_runs_) {
     // Dump Buffer
     len = ringbuf_consume(the_trace->ringbuf_, &woff);
@@ -538,7 +412,7 @@ void *MiniTrace::ConsumerFunction(void *arg) {
       ringbuf_release(the_trace->ringbuf_, len);
 
       // Save to data binary file
-      if (!the_trace->trace_data_file_->WriteFully(databuf, len)) {
+      if (!trace_data_file_->WriteFully(databuf, len)) {
         std::string detail(StringPrintf("MiniTrace: Trace data write failed: %s", strerror(errno)));
         PLOG(ERROR) << detail;
         {
@@ -550,48 +424,77 @@ void *MiniTrace::ConsumerFunction(void *arg) {
     }
 
     // Dump Method
-    std::ostringstream os;
     {
       MutexLock mu(self, *the_trace->traced_method_lock_);
-      the_trace->FlushMethod(os);
+      the_trace->DumpMethod(buffer);
     }
-    std::string buf(os.str());
-    if (!the_trace->trace_method_info_file_->WriteFully(buf.c_str(), buf.length())) {
-      std::string detail(StringPrintf("MiniTrace: Trace method info write failed: %s", strerror(errno)));
-      PLOG(ERROR) << detail;
-      {
-        Locks::mutator_lock_->ExclusiveLock(self);
-        ThrowRuntimeException("%s", detail.c_str());
-        Locks::mutator_lock_->ExclusiveUnlock(self);
+    if (!buffer.empty()) {
+      if (!trace_method_info_file_->WriteFully(buffer.c_str(), buffer.length())) {
+        std::string detail(StringPrintf("MiniTrace: Trace method info write failed: %s", strerror(errno)));
+        PLOG(ERROR) << detail;
+        {
+          Locks::mutator_lock_->ExclusiveLock(self);
+          ThrowRuntimeException("%s", detail.c_str());
+          Locks::mutator_lock_->ExclusiveUnlock(self);
+        }
       }
     }
 
     // Dump Field
-    os.str("");
     {
       MutexLock mu(self, *the_trace->traced_field_lock_);
-      the_trace->FlushField(os);
+      the_trace->DumpField(buffer);
     }
-    buf.assign(os.str());
-    if (!the_trace->trace_field_info_file_->WriteFully(buf.c_str(), buf.length())) {
-      std::string detail(StringPrintf("MiniTrace: Trace field info write failed: %s", strerror(errno)));
-      PLOG(ERROR) << detail;
-      {
-        Locks::mutator_lock_->ExclusiveLock(self);
-        ThrowRuntimeException("%s", detail.c_str());
-        Locks::mutator_lock_->ExclusiveUnlock(self);
+    if (!buffer.empty()) {
+      if (!trace_field_info_file_->WriteFully(buffer.c_str(), buffer.length())) {
+        std::string detail(StringPrintf("MiniTrace: Trace field info write failed: %s", strerror(errno)));
+        PLOG(ERROR) << detail;
+        {
+          Locks::mutator_lock_->ExclusiveLock(self);
+          ThrowRuntimeException("%s", detail.c_str());
+          Locks::mutator_lock_->ExclusiveUnlock(self);
+        }
       }
     }
 
     // Dump Thread
-    os.str("");
     {
       MutexLock mu(self, *the_trace->traced_thread_lock_);
-      the_trace->FlushThread(os);
+      the_trace->DumpThread(buffer);
     }
-    buf.assign(os.str());
-    if (!the_trace->trace_thread_info_file_->WriteFully(buf.c_str(), buf.length())) {
-      std::string detail(StringPrintf("MiniTrace: Trace thread info write failed: %s", strerror(errno)));
+    if (!buffer.empty()) {
+      if (!trace_thread_info_file_->WriteFully(buffer.c_str(), buffer.length())) {
+        std::string detail(StringPrintf("MiniTrace: Trace thread info write failed: %s", strerror(errno)));
+        PLOG(ERROR) << detail;
+        {
+          Locks::mutator_lock_->ExclusiveLock(self);
+          ThrowRuntimeException("%s", detail.c_str());
+          Locks::mutator_lock_->ExclusiveUnlock(self);
+        }
+      }
+    }
+  }
+
+/*
+  // Handle last consumption
+  // Prevent Logging
+  MutexLock mu1(self, *the_trace->traced_method_lock_);
+  MutexLock mu2(self, *the_trace->traced_field_lock_);
+  MutexLock mu3(self, *the_trace->traced_thread_lock_);
+
+  // Flush remaining outputs
+  // Similar to consumer_func, but no lock
+  char databuf[the_trace->buffer_size_];
+  size_t len, woff;
+  // Dump Buffer
+  len = ringbuf_consume(the_trace->ringbuf_, &woff);
+  if (len > 0) {
+    the_trace->ReadBuffer(databuf, woff, len);
+    ringbuf_release(the_trace->ringbuf_, len);
+
+    // Save to data binary file
+    if (!trace_data_file_->WriteFully(databuf, len)) {
+      std::string detail(StringPrintf("MiniTrace: Trace data write failed: %s", strerror(errno)));
       PLOG(ERROR) << detail;
       {
         Locks::mutator_lock_->ExclusiveLock(self);
@@ -601,6 +504,62 @@ void *MiniTrace::ConsumerFunction(void *arg) {
     }
   }
 
+  // Dump Method
+  std::ostringstream os;
+  the_trace->FlushMethod(os);
+  std::string buf(os.str());
+  if (!trace_method_info_file_->WriteFully(buf.c_str(), buf.length())) {
+    std::string detail(StringPrintf("MiniTrace: Trace method info write failed: %s", strerror(errno)));
+    PLOG(ERROR) << detail;
+    {
+      Locks::mutator_lock_->ExclusiveLock(self);
+      ThrowRuntimeException("%s", detail.c_str());
+      Locks::mutator_lock_->ExclusiveUnlock(self);
+    }
+  }
+
+  // Dump Field
+  os.str("");
+  the_trace->FlushField(os);
+  buf.assign(os.str());
+  if (!trace_field_info_file_->WriteFully(buf.c_str(), buf.length())) {
+    std::string detail(StringPrintf("MiniTrace: Trace field info write failed: %s", strerror(errno)));
+    PLOG(ERROR) << detail;
+    {
+      Locks::mutator_lock_->ExclusiveLock(self);
+      ThrowRuntimeException("%s", detail.c_str());
+      Locks::mutator_lock_->ExclusiveUnlock(self);
+    }
+  }
+
+  // Dump Thread
+  os.str("");
+  the_trace->FlushThread(os);
+  buf.assign(os.str());
+  if (!trace_thread_info_file_->WriteFully(buf.c_str(), buf.length())) {
+    std::string detail(StringPrintf("MiniTrace: Trace thread info write failed: %s", strerror(errno)));
+    PLOG(ERROR) << detail;
+    {
+      Locks::mutator_lock_->ExclusiveLock(self);
+      ThrowRuntimeException("%s", detail.c_str());
+      Locks::mutator_lock_->ExclusiveUnlock(self);
+    }
+  }
+*/
+  delete databuf;
+  CHECK(trace_data_file_->Close() == 0);
+  CHECK(trace_method_info_file_->Close() == 0);
+  CHECK(trace_field_info_file_->Close() == 0);
+  CHECK(trace_thread_info_file_->Close() == 0);
+
+  if (!the_trace->CreateSocketAndAlertTheEnd(
+        trace_method_info_filename,
+        trace_field_info_filename,
+        trace_thread_info_filename,
+        trace_data_filename
+      )) {
+    LOG(ERROR) << "MiniTrace: Alerting the end failed.";
+  }
   runtime->DetachCurrentThread();
   return 0;
 }
@@ -625,10 +584,6 @@ MiniTrace::MiniTrace(uint32_t events, uint32_t buffer_size)
   ringbuf_setup(ringbuf_, MAX_THREAD_COUNT, buffer_size);
   for (int i=0; i<MAX_THREAD_COUNT; i++)
     is_registered_[i] = false;
-
-  CHECK_PTHREAD_CALL(pthread_create, (&consumer_thread_, NULL, &ConsumerFunction,
-                                      this),
-                                      "Consumer thread");
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
@@ -784,29 +739,32 @@ void MiniTrace::StoreExitingThreadInfo(Thread* thread) {
   }
 }
 
-void MiniTrace::FlushMethod(std::ostringstream &os) {
+void MiniTrace::DumpMethod(std::string &string) {
   Thread *self = Thread::Current();
   traced_method_lock_->AssertHeld(self);
+  string.assign("");
   for (auto& it: methods_not_stored_) {
-    (&it)->Dump(os);
+    (&it)->Dump(string);
   }
   methods_not_stored_.clear();
 }
 
-void MiniTrace::FlushField(std::ostringstream &os) {
+void MiniTrace::DumpField(std::string &string) {
   Thread *self = Thread::Current();
   traced_field_lock_->AssertHeld(self);
+  string.assign("");
   for (auto& it: fields_not_stored_) {
-    (&it)->Dump(os);
+    (&it)->Dump(string);
   }
   fields_not_stored_.clear();
 }
 
-void MiniTrace::FlushThread(std::ostringstream &os) {
+void MiniTrace::DumpThread(std::string &string) {
   Thread *self = Thread::Current();
   traced_thread_lock_->AssertHeld(self);
+  string.assign("");
   for (auto& it : threads_not_stored_) {
-    (&it)->Dump(os);
+    (&it)->Dump(string);
   }
   threads_not_stored_.clear();
 }

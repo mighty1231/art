@@ -151,12 +151,12 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     bool operator< (const ArtMethodDetail *other) const {
       return this->method_ < other->method_;
     }
-    void Dump(std::ostringstream &os) {
-      os << StringPrintf("%p\t%s\t%s\t%s\t%s\n", method_,
+    void Dump(std::string &string) {
+      string.append(StringPrintf("%p\t%s\t%s\t%s\t%s\n", method_,
         classDescriptor_.c_str(),
         name_.c_str(),
         signature_.c_str(),
-        declaringClassSourceFile_.c_str());
+        declaringClassSourceFile_.c_str()));
     }
   private:
     mirror::ArtMethod* method_;
@@ -177,9 +177,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     bool operator< (const ArtFieldDetail *other) const {
       return this->field_ < other->field_;
     }
-    void Dump(std::ostringstream &os) {
-      os << StringPrintf("%p\t%s\t%s\t%s\n", field_,
-        classDescriptor_.c_str(), name_.c_str(), typeDesc_.c_str());
+    void Dump(std::string &string) {
+      string.append(StringPrintf("%p\t%s\t%s\t%s\n", field_,
+        classDescriptor_.c_str(), name_.c_str(), typeDesc_.c_str()));
     }
   private:
     mirror::ArtField* field_;
@@ -197,8 +197,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       else
         return this->pid_ < other->pid_;
     }
-    void Dump(std::ostringstream &os) {
-      os << pid_ << '\t' << name_ << '\n';
+    void Dump(std::string &string) {
+      string.append(StringPrintf("%d\t%s\n", pid_, name_.c_str()));
     }
   private:
     pid_t pid_;
@@ -208,7 +208,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
  private:
   explicit MiniTrace(uint32_t events, uint32_t buffer_size);
 
-  bool Setup(const char *file_prefix);
+  void SetPrefix(const char *prefix) { strcpy(prefix_, prefix); }
 
   void LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
                            instrumentation::Instrumentation::InstrumentationEvent event)
@@ -222,9 +222,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
                            bool enter_event)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  void FlushMethod(std::ostringstream &os); // SHARED_LOCKS_REQUIRED(this->traced_method_lock_)
-  void FlushField(std::ostringstream &os); // SHARED_LOCKS_REQUIRED(this->traced_field_lock_)
-  void FlushThread(std::ostringstream &os); // SHARED_LOCKS_REQUIRED(this->traced_thread_lock_)
+  void DumpMethod(std::string &buffer); // SHARED_LOCKS_REQUIRED(this->traced_method_lock_)
+  void DumpField(std::string &buffer); // SHARED_LOCKS_REQUIRED(this->traced_field_lock_)
+  void DumpThread(std::string &buffer); // SHARED_LOCKS_REQUIRED(this->traced_thread_lock_)
 
   bool CreateSocketAndAlertTheEnd(
       const std::string &trace_method_info_filename,
@@ -243,23 +243,11 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   // Singleton instance of the Trace or NULL when no method tracing is active.
   static MiniTrace* volatile the_trace_ GUARDED_BY(Locks::trace_lock_);
 
-  // File for log method info
-  File* trace_method_info_file_;
-
-  // File for log field info
-  File* trace_field_info_file_;
-
-  // File for log thread info
-  File* trace_thread_info_file_;
-
-  // File for log trace data
-  File* trace_data_file_;
-
   // Prefix for log info and data
-  std::string prefix_;
+  char prefix_[100];
 
   // Buffer to store trace data.
-  std::unique_ptr<uint8_t> buf_;
+  uint8_t *buf_;
 
   // manages buf, as ring buffer
   ringbuf_t *ringbuf_;
