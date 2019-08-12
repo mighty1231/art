@@ -270,7 +270,7 @@ void MiniTrace::Start() {
   MiniTrace *the_trace;
   {
     MutexLock mu(self, *Locks::trace_lock_);
-    if (the_trace_ != NULL)
+    if (the_trace_ != NULL) // Already started
       return;
     else if (!CreateSocketAndCheckUIDAndPrefix(prefix, uid))
       return;
@@ -349,18 +349,16 @@ void MiniTrace::Checkout() {
     CHECK_PTHREAD_CALL(pthread_join, (the_trace->consumer_thread_, NULL), 
         "consumer thread shutdown");
 
-    char prefix[100];
-    if(!CreateSocketAndCheckUIDAndPrefix(prefix, getuid())) {
+    if(!CreateSocketAndCheckUIDAndPrefix(the_trace->prefix_, getuid())) {
       // @TODO server connection failed, so delete the trace...
       return;
     }
-    the_trace->SetPrefix(prefix);
 
     // restart consumer
+    the_trace->consumer_runs_ = true;
     CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
                                         the_trace),
                                         "Consumer thread");
-    the_trace->consumer_runs_ = true;
   }
 }
 
@@ -475,77 +473,6 @@ void *MiniTrace::ConsumerFunction(void *arg) {
     }
   }
 
-/*
-  // Handle last consumption
-  // Prevent Logging
-  MutexLock mu1(self, *the_trace->traced_method_lock_);
-  MutexLock mu2(self, *the_trace->traced_field_lock_);
-  MutexLock mu3(self, *the_trace->traced_thread_lock_);
-
-  // Flush remaining outputs
-  // Similar to consumer_func, but no lock
-  char databuf[the_trace->buffer_size_];
-  size_t len, woff;
-  // Dump Buffer
-  len = ringbuf_consume(the_trace->ringbuf_, &woff);
-  if (len > 0) {
-    the_trace->ReadBuffer(databuf, woff, len);
-    ringbuf_release(the_trace->ringbuf_, len);
-
-    // Save to data binary file
-    if (!trace_data_file_->WriteFully(databuf, len)) {
-      std::string detail(StringPrintf("MiniTrace: Trace data write failed: %s", strerror(errno)));
-      PLOG(ERROR) << detail;
-      {
-        Locks::mutator_lock_->ExclusiveLock(self);
-        ThrowRuntimeException("%s", detail.c_str());
-        Locks::mutator_lock_->ExclusiveUnlock(self);
-      }
-    }
-  }
-
-  // Dump Method
-  std::ostringstream os;
-  the_trace->FlushMethod(os);
-  std::string buf(os.str());
-  if (!trace_method_info_file_->WriteFully(buf.c_str(), buf.length())) {
-    std::string detail(StringPrintf("MiniTrace: Trace method info write failed: %s", strerror(errno)));
-    PLOG(ERROR) << detail;
-    {
-      Locks::mutator_lock_->ExclusiveLock(self);
-      ThrowRuntimeException("%s", detail.c_str());
-      Locks::mutator_lock_->ExclusiveUnlock(self);
-    }
-  }
-
-  // Dump Field
-  os.str("");
-  the_trace->FlushField(os);
-  buf.assign(os.str());
-  if (!trace_field_info_file_->WriteFully(buf.c_str(), buf.length())) {
-    std::string detail(StringPrintf("MiniTrace: Trace field info write failed: %s", strerror(errno)));
-    PLOG(ERROR) << detail;
-    {
-      Locks::mutator_lock_->ExclusiveLock(self);
-      ThrowRuntimeException("%s", detail.c_str());
-      Locks::mutator_lock_->ExclusiveUnlock(self);
-    }
-  }
-
-  // Dump Thread
-  os.str("");
-  the_trace->FlushThread(os);
-  buf.assign(os.str());
-  if (!trace_thread_info_file_->WriteFully(buf.c_str(), buf.length())) {
-    std::string detail(StringPrintf("MiniTrace: Trace thread info write failed: %s", strerror(errno)));
-    PLOG(ERROR) << detail;
-    {
-      Locks::mutator_lock_->ExclusiveLock(self);
-      ThrowRuntimeException("%s", detail.c_str());
-      Locks::mutator_lock_->ExclusiveUnlock(self);
-    }
-  }
-*/
   delete databuf;
   CHECK(trace_data_file_->Close() == 0);
   CHECK(trace_method_info_file_->Close() == 0);
@@ -566,16 +493,14 @@ void *MiniTrace::ConsumerFunction(void *arg) {
 
 MiniTrace::MiniTrace(uint32_t events, uint32_t buffer_size)
     : buf_(new uint8_t[buffer_size]()),
+      registered_threads_lock_(new Mutex("MiniTrace thread-ringbuf lock")),
       consumer_runs_(true),
       on_change_(new Mutex("MiniTrace main status lock")),
       events_(events), do_coverage_((events & kDoCoverage) != 0),
-      do_filter_((events & kDoFilter) != 0), buffer_size_(buffer_size), start_time_(MicroTime()) {
-
-  traced_method_lock_ = new Mutex("MiniTrace method lock");
-  traced_field_lock_ = new Mutex("MiniTrace field lock");
-  traced_thread_lock_ = new Mutex("MiniTrace thread lock");
-
-  registered_threads_lock_ = new Mutex("MiniTrace thread lock 2");
+      do_filter_((events & kDoFilter) != 0), buffer_size_(buffer_size), start_time_(MicroTime()),
+      traced_method_lock_(new Mutex("MiniTrace method lock")),
+      traced_field_lock_(new Mutex("MiniTrace field lock")),
+      traced_thread_lock_(new Mutex("MiniTrace thread lock")) {
 
   size_t ringbuf_obj_size;
   ringbuf_get_sizes(MAX_THREAD_COUNT, &ringbuf_obj_size, NULL);

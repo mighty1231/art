@@ -41,8 +41,8 @@
 #include "ringbuf.h"
 #include "base/mutex.h"
 
-
-#define MAX_THREAD_COUNT 64
+// MAX_THREAD_COUNT may not be enough.
+#define MAX_THREAD_COUNT 96
 namespace art {
 
 namespace mirror {
