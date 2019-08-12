@@ -880,53 +880,56 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass) {
 
 ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
   Thread *self = Thread::Current();
-  if (self->GetRingBufWorker() != NULL) {
-    return self->GetRingBufWorker();
+  ringbuf_worker_t *rworker = self->GetRingBufWorker();
+  if (rworker != NULL) {
+    return rworker;
   } else {
-    // Not found
-    // Find empty id
-    LOG(INFO) << "MiniTrace: Register ring buf worker with thread " << self->GetTid();
-    MutexLock mu(self, *registered_threads_lock_);
-    uint32_t empty_id;
-    for (empty_id=0; empty_id<MAX_THREAD_COUNT; empty_id++) {
-      if (is_registered_[empty_id] == false)
-        break;
-    }
-    if (empty_id == MAX_THREAD_COUNT) {
-      LOG(ERROR) << "MiniTrace: Failed to allocate new ringbuf worker";
-      return NULL;
-    }
-
-    ringbuf_worker_t *rworker = ringbuf_register(ringbuf_, empty_id);
-    is_registered_[empty_id] = true;
-    LOG(INFO) << "MiniTrace: Assigining id " << empty_id << " and rworker " << rworker;
-    registered_threads_[self] = rworker;
-    self->SetRingBufWorker(rworker);
+    // Not found, so find empty id
     std::string name;
     self->GetThreadName(name);
+    size_t wid;
+    {
+      MutexLock mu(self, *registered_threads_lock_);
+      for (wid=0; wid<MAX_THREAD_COUNT; wid++) {
+        if (is_registered_[wid] == false)
+          break;
+      }
+      CHECK(wid != MAX_THREAD_COUNT); // Too many threads
+
+      rworker = ringbuf_register(ringbuf_, wid);
+      registered_threads_[self] = rworker;
+      is_registered_[wid] = true;
+      self->SetRingBufWorker(rworker);
+    }
     {
       MutexLock mu(self, *traced_thread_lock_);
       threads_not_stored_.emplace_back(self->GetTid(), name);
     }
+    LOG(INFO) << StringPrintf("MiniTrace: Register ringbuf worker [tid=%d name=\"%s\" wid=%zu rworker=%p]",
+        self->GetTid(), name.c_str(), wid, rworker);
     return rworker;
   }
 }
 
 void MiniTrace::UnregisterRingBufWorker(Thread *thread) {
   Thread *self = Thread::Current();
+  std::string name;
+  self->GetThreadName(name);
+  std::map<Thread *, ringbuf_worker_t *>::iterator it;
+  size_t wid;
   {
     MutexLock mu(self, *registered_threads_lock_);
-    std::map<Thread *, ringbuf_worker_t *>::iterator it;
     it = registered_threads_.find(thread);
-    if (it == registered_threads_.end()) {
-      LOG(ERROR) << "MiniTrace: Failed to unregister ringbuf worker, not found";
-    } else {
-      thread->SetRingBufWorker(NULL);
-      ringbuf_unregister(ringbuf_, it->second);
-      is_registered_[ringbuf_w2i(ringbuf_, it->second)] = false;
-      registered_threads_.erase(it);
-    }
+    CHECK(it != registered_threads_.end());
+    wid = ringbuf_w2i(ringbuf_, it->second);
+
+    ringbuf_unregister(ringbuf_, it->second);
+    registered_threads_.erase(it);
+    is_registered_[wid] = false;
+    thread->SetRingBufWorker(NULL);
   }
+  LOG(INFO) << StringPrintf("MiniTrace: Unregister ringbuf worker [tid=%d name=\"%s\" wid=%zu]",
+      self->GetTid(), name.c_str(), wid);
 }
 
 }  // namespace art

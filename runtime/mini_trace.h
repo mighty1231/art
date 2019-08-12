@@ -132,22 +132,20 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   class ArtMethodDetail {
   public:
-    ArtMethodDetail(mirror::ArtMethod* method) : method_(method),
-        classDescriptor_(method->GetDeclaringClassDescriptor()),
-        name_(method->GetName()), signature_(method->GetSignature().ToString()),
-        declaringClassSourceFile_(method->GetDeclaringClassSourceFile()) {
-
-    // if (method->GetDeclaringClassDescriptor() == NULL || 
-    //       method->GetDeclaringClassSourceFile() == NULL) {
-    //   LOG(ERROR) << "MiniTrace: Not expected on LogNewMethod";
-    //   methods_not_stored_.emplace_back(
-    //     method,
-    //     "UnknownDescriptor",
-    //     method->GetName(),
-    //     "UnknownSignature",
-    //     "UnknownDeclaringClassSourceFile"
-    //   );
-      }
+    ArtMethodDetail(mirror::ArtMethod* method) : method_(method) {
+      const char *descriptor = method->GetDeclaringClassDescriptor();
+      if (descriptor == NULL)
+        classDescriptor_.assign("NoDescriptor");
+      else
+        classDescriptor_.assign(descriptor);
+      name_.assign(method->GetName());
+      signature_.assign(method->GetSignature().ToString()); // It never fails, "<no signature>" in dexfile.cc:994
+      const char *declaringClassSourceFile = method->GetDeclaringClassSourceFile();
+      if (declaringClassSourceFile == NULL)
+        declaringClassSourceFile_.assign("NoClassSourceFile");
+      else
+        declaringClassSourceFile_.assign(method->GetDeclaringClassSourceFile());
+    }
     bool operator< (const ArtMethodDetail *other) const {
       return this->method_ < other->method_;
     }
