@@ -229,6 +229,7 @@ bool MiniTrace::CreateSocketAndAlertTheEnd(
 
 void MiniTrace::ReadBuffer(char *dest, size_t offset, size_t len) {
   // Must be called after ringbuf_consume
+  Locks::mutator_lock_->AssertExclusiveHeld(Thread::Current());
   if (offset + len <= buffer_size_) {
     memcpy(dest, buf_ + offset, len);
   } else {
@@ -241,6 +242,7 @@ void MiniTrace::ReadBuffer(char *dest, size_t offset, size_t len) {
 
 void MiniTrace::WriteBuffer(const char *src, size_t offset, size_t len) {
   // Must be called after ringbuf_acquire
+  Locks::mutator_lock_->AssertExclusiveHeld(Thread::Current());
   if (offset + len <= buffer_size_) {
     memcpy(buf_ + offset, src, len);
   } else {
@@ -278,37 +280,51 @@ void MiniTrace::Start() {
     the_trace = the_trace_ = new MiniTrace(events, 1024 * 1024);
   }
   Runtime* runtime = Runtime::Current();
-  runtime->GetThreadList()->SuspendAll();
-
-  runtime->GetInstrumentation()->AddListener(the_trace, events);
-  runtime->GetInstrumentation()->EnableMethodTracing();
-  runtime->GetThreadList()->ResumeAll();
-
   the_trace->SetPrefix(prefix);
+  runtime->GetThreadList()->SuspendAll();
   CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
                                       the_trace),
                                       "Consumer thread");
+  runtime->GetInstrumentation()->AddListener(the_trace, events);
+  runtime->GetInstrumentation()->EnableMethodTracing();
+  runtime->GetThreadList()->ResumeAll();
 }
 
 void MiniTrace::Stop() {
   // Stop would not be called...
   Runtime* runtime = Runtime::Current();
-  runtime->GetThreadList()->SuspendAll();
   MiniTrace* the_trace = NULL;
   {
+    // This block prevents more than one invocation for MiniTrace::Stop
     MutexLock mu(Thread::Current(), *Locks::trace_lock_);
-    if (the_trace_ == NULL) {
-      LOG(ERROR) << "MiniTrace: Trace stop requested, but no trace currently running";
-    } else {
+    if (the_trace_ == NULL)
+      return;
+    else {
       the_trace = the_trace_;
       the_trace_ = NULL;
     }
   }
   if (the_trace != NULL) {
+    // Wait for consumer
     LOG(INFO) << "MiniTrace: Stop() called";
+    Thread *consumer_thread = NULL;
+    ThreadList *runtime_thread_list = runtime->GetThreadList();
+    if (the_trace->consumer_runs_ && the_trace->consumer_tid_ != 0)
+      consumer_thread = runtime_thread_list->FindThreadByThreadId(the_trace->consumer_tid_);
+
+    runtime_thread_list->SuspendAll();
     runtime->GetInstrumentation()->DisableMethodTracing();
     runtime->GetInstrumentation()->RemoveListener(the_trace, the_trace->events_);
 
+    // Wait for consumer
+    if (consumer_thread != NULL) {
+      the_trace->consumer_runs_ = false;
+      runtime_thread_list->Resume(consumer_thread);
+      CHECK_PTHREAD_CALL(pthread_join, (the_trace->consumer_thread_, NULL),
+          "consumer thread shutdown");
+    }
+
+    // delete trace objects
     delete the_trace->registered_threads_lock_;
     delete the_trace->traced_method_lock_;
     delete the_trace->traced_field_lock_;
@@ -317,8 +333,8 @@ void MiniTrace::Stop() {
     free(the_trace->ringbuf_);
 
     delete the_trace;
+    runtime_thread_list->ResumeAll();
   }
-  runtime->GetThreadList()->ResumeAll();
 }
 
 void MiniTrace::Shutdown() {
@@ -333,32 +349,29 @@ void MiniTrace::Checkout() {
   MiniTrace *the_trace = NULL;
   {
     MutexLock mu(self, *Locks::trace_lock_);
-    if (the_trace_ != NULL) {
-      the_trace = the_trace_;
-    }
+    the_trace = the_trace_;
   }
-  if (the_trace == NULL) {
-    // Just start the MiniTrace
+  if (the_trace == NULL)
     Start();
-  } else {
-    // @TODO If Stop is called..??
-
-    // Wait consumer thread first, since it needs locks
-    MutexLock mu(self, *the_trace->on_change_);
+  else {
+    // Wait consumer thread
+    LOG(INFO) << "MiniTrace: Checkout called";
     the_trace->consumer_runs_ = false;
     CHECK_PTHREAD_CALL(pthread_join, (the_trace->consumer_thread_, NULL), 
         "consumer thread shutdown");
+    the_trace->consumer_tid_ = 0;
 
     if(!CreateSocketAndCheckUIDAndPrefix(the_trace->prefix_, getuid())) {
       // @TODO server connection failed, so delete the trace...
-      return;
+      LOG(ERROR) << "MiniTrace: Failed to connect server during Checkout";
+      Stop();
+    } else {
+      // restart consumer
+      the_trace->consumer_runs_ = true;
+      CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
+                                          the_trace),
+                                          "Consumer thread");
     }
-
-    // restart consumer
-    the_trace->consumer_runs_ = true;
-    CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
-                                        the_trace),
-                                        "Consumer thread");
   }
 }
 
@@ -379,7 +392,8 @@ void *MiniTrace::ConsumerFunction(void *arg) {
                                        !runtime->IsCompiler()));
 
   Thread *self = Thread::Current();
-  LOG(INFO) << "MiniTrace: Consumer registered with tid " << self->GetTid();
+  LOG(INFO) << "MiniTrace: Consumer thread attached with tid " << self->GetTid();
+  the_trace->consumer_tid_ = self->GetTid();
 
   // Create empty file to log data
   std::string trace_data_filename(StringPrintf("%sdata.bin", the_trace->prefix_));
@@ -474,9 +488,13 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   }
 
   delete databuf;
+  CHECK(trace_data_file_->Flush() == 0);
   CHECK(trace_data_file_->Close() == 0);
+  CHECK(trace_method_info_file_->Flush() == 0);
   CHECK(trace_method_info_file_->Close() == 0);
+  CHECK(trace_field_info_file_->Flush() == 0);
   CHECK(trace_field_info_file_->Close() == 0);
+  CHECK(trace_thread_info_file_->Flush() == 0);
   CHECK(trace_thread_info_file_->Close() == 0);
 
   if (!the_trace->CreateSocketAndAlertTheEnd(
@@ -494,8 +512,7 @@ void *MiniTrace::ConsumerFunction(void *arg) {
 MiniTrace::MiniTrace(uint32_t events, uint32_t buffer_size)
     : buf_(new uint8_t[buffer_size]()),
       registered_threads_lock_(new Mutex("MiniTrace thread-ringbuf lock")),
-      consumer_runs_(true),
-      on_change_(new Mutex("MiniTrace main status lock")),
+      consumer_runs_(true), consumer_tid_(0),
       events_(events), do_coverage_((events & kDoCoverage) != 0),
       do_filter_((events & kDoFilter) != 0), buffer_size_(buffer_size), start_time_(MicroTime()),
       traced_method_lock_(new Mutex("MiniTrace method lock")),
@@ -558,6 +575,9 @@ void MiniTrace::ExceptionCaught(Thread* thread, const ThrowLocation& throw_locat
                             mirror::Throwable* exception_object) {
   MiniTraceAction action = kMiniTraceExceptionCaught;
 
+  ringbuf_worker_t *w = GetRingBufWorker();
+  if (w == NULL)
+    return;
   std::string content = exception_object->Dump();
   uint16_t record_size = content.length() + 2 + 4 + 1;
   char *buf = new char[record_size]();
@@ -567,7 +587,6 @@ void MiniTrace::ExceptionCaught(Thread* thread, const ThrowLocation& throw_locat
   Append4LE(buf + 2, (record_size << 3) | action);
   strcpy(buf + 6, content.c_str());
 
-  ringbuf_worker_t *w = GetRingBufWorker();
   while ((off = ringbuf_acquire(ringbuf_, w, record_size)) == -1) {}
   WriteBuffer(buf, off, record_size);
   ringbuf_produce(ringbuf_, w);
@@ -592,6 +611,9 @@ void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, u
       UNIMPLEMENTED(FATAL) << "MiniTrace: Unexpected event: " << event;
   }
 
+  ringbuf_worker_t *w = GetRingBufWorker();
+  if (w == NULL)
+    return;
   LogNewMethod(method);
 
   char buf[6];
@@ -601,7 +623,6 @@ void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, u
   Append2LE(buf, thread->GetTid());
   Append4LE(buf + 2, method_ptr | action);
 
-  ringbuf_worker_t *w = GetRingBufWorker();
   while ((off = ringbuf_acquire(ringbuf_, w, 6)) == -1) {}
   WriteBuffer(buf, off, 6);
   ringbuf_produce(ringbuf_, w);
@@ -621,6 +642,9 @@ void MiniTrace::LogFieldTraceEvent(Thread* thread, mirror::Object *this_object, 
     action = kMiniTraceFieldWrite;
   }
 
+  ringbuf_worker_t *w = GetRingBufWorker();
+  if (w == NULL)
+    return;
   LogNewField(field);
 
   char buf[14];
@@ -630,7 +654,6 @@ void MiniTrace::LogFieldTraceEvent(Thread* thread, mirror::Object *this_object, 
   Append4LE(buf + 6, PointerToLowMemUInt32(this_object));
   Append4LE(buf + 10, dex_pc);
 
-  ringbuf_worker_t *w = GetRingBufWorker();
   while ((off = ringbuf_acquire(ringbuf_, w, 14)) == -1) {}
   WriteBuffer(buf, off, 14);
   ringbuf_produce(ringbuf_, w);
@@ -645,13 +668,15 @@ void MiniTrace::LogMonitorTraceEvent(Thread* thread, mirror::Object* lock_object
     action = kMiniTraceMonitorExit;
   }
 
+  ringbuf_worker_t *w = GetRingBufWorker();
+  if (w == NULL)
+    return;
   char buf[10];
   ssize_t off;
   Append2LE(buf, thread->GetTid());
   Append4LE(buf + 2, PointerToLowMemUInt32(lock_object) | action);
   Append4LE(buf + 6, dex_pc);
 
-  ringbuf_worker_t *w = GetRingBufWorker();
   while ((off = ringbuf_acquire(ringbuf_, w, 10)) == -1) {}
   WriteBuffer(buf, off, 10);
   ringbuf_produce(ringbuf_, w);
@@ -805,6 +830,9 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass) {
 
 ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
   Thread *self = Thread::Current();
+  if (pthread_self() == consumer_thread_)
+    return NULL;
+
   ringbuf_worker_t *rworker = self->GetRingBufWorker();
   if (rworker != NULL) {
     return rworker;
@@ -838,8 +866,11 @@ ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
 
 void MiniTrace::UnregisterRingBufWorker(Thread *thread) {
   Thread *self = Thread::Current();
+  if (pthread_self() == consumer_thread_)
+    return;
+
   std::string name;
-  self->GetThreadName(name);
+  thread->GetThreadName(name);
   std::map<Thread *, ringbuf_worker_t *>::iterator it;
   size_t wid;
   {
@@ -854,7 +885,7 @@ void MiniTrace::UnregisterRingBufWorker(Thread *thread) {
     thread->SetRingBufWorker(NULL);
   }
   LOG(INFO) << StringPrintf("MiniTrace: Unregister ringbuf worker [tid=%d name=\"%s\" wid=%zu]",
-      self->GetTid(), name.c_str(), wid);
+      thread->GetTid(), name.c_str(), wid);
 }
 
 }  // namespace art

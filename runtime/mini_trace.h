@@ -127,7 +127,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   static void StoreExitingThreadInfo(Thread* thread);
 
-  static void *ConsumerFunction(void *mt_object);
+  static void *ConsumerFunction(void *mt_object) LOCKS_EXCLUDED(Locks::trace_lock_);
 
 
   class ArtMethodDetail {
@@ -258,10 +258,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   // Used for consumer - MiniTrace synchronization
   pthread_t consumer_thread_;
   volatile bool consumer_runs_;
-
-  // Exclusive call on Setup, Stop, Checkout
-  // @TODO Stop and Checkout
-  Mutex *on_change_;
+  pid_t consumer_tid_;
 
   ringbuf_worker_t *GetRingBufWorker();
   void UnregisterRingBufWorker(Thread *thread);
