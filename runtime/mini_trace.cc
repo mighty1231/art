@@ -49,19 +49,16 @@ namespace art {
 enum MiniTraceAction {
     kMiniTraceMethodEnter = 0x00,       // method entry
     kMiniTraceMethodExit = 0x01,        // method exit
-    kMiniTraceUnroll = 0x02,            // method exited by exception unrolling
+    kMiniTraceUnwind = 0x02,            // method exited by exception unwinding
     kMiniTraceFieldRead = 0x03,         // field read
     kMiniTraceFieldWrite = 0x04,        // field write
-    kMiniTraceMonitorEnter = 0x05,      // monitor enter
-    kMiniTraceMonitorExit = 0x06,       // monitor exit
-    kMiniTraceExceptionCaught = 0x07,   // exception caught
+    kMiniTraceExceptionCaught = 0x05,   // exception caught
     kMiniTraceActionMask = 0x07,        // three bits
 };
 
 enum MiniTraceEventLength {
   kMiniTraceMethodEventLength = 6,
   kMiniTraceFieldEventLength = 14,
-  kMiniTraceMonitorEventLength = 10,
   kMiniTraceLargestEventLength = kMiniTraceFieldEventLength,
 };
 
@@ -116,7 +113,7 @@ static int read_with_timeout (int socket_fd, void *buf, int size, int timeout_se
   return total_written;
 }
 
-static bool CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid) {
+static bool CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid, uint32_t *log_flag) {
   int socket_fd;
   sockaddr_un server_addr;
   if ((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
@@ -149,20 +146,25 @@ static bool CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid) {
       write(socket_fd, &SPECIAL_VALUE, 4);
 
       // read available path
-      written = read_with_timeout(socket_fd, &prefix_length, 4, 3);
-      if (written == 4 && prefix_length > 0 && prefix_length < 256) {
-        written = read_with_timeout(socket_fd, buf, prefix_length + 1, 3);
-        if (written == prefix_length + 1) {
-          close(socket_fd);
-          return true;
+      written = read_with_timeout(socket_fd, log_flag, 4, 3);
+      if (written == 4 && (*log_flag & ~MiniTrace::MiniTraceFlag::kFlagAll) == 0) {
+        written = read_with_timeout(socket_fd, &prefix_length, 4, 3);
+        if (written == 4 && prefix_length > 0 && prefix_length < 256) {
+          written = read_with_timeout(socket_fd, buf, prefix_length + 1, 3);
+          if (written == prefix_length + 1) {
+            close(socket_fd);
+            return true;
+          } else {
+            LOG(ERROR) << "MiniTrace: Read Prefix " << errno;
+          }
         } else {
-          LOG(ERROR) << "MiniTrace: Read Prefix " << errno;
+          PLOG(ERROR) << "MiniTrace: Read Prefix length " << errno;
         }
       } else {
-        PLOG(ERROR) << "MiniTrace: Read Prefix length " << errno;
+        LOG(ERROR) << "MiniTrace: Read flag " << errno;
       }
     } else {
-      PLOG(INFO) << "MiniTrace: Mismatch UID " << targetuid << " != " << (uid & 0xFFFF);
+      PLOG(INFO) << "MiniTrace: Mismatch UID " << targetuid << " != " << uid;
     }
   } else {
     PLOG(ERROR) << "MiniTrace: Read UID " << errno;
@@ -255,29 +257,22 @@ void MiniTrace::WriteBuffer(const char *src, size_t offset, size_t len) {
 
 void MiniTrace::Start() {
   uid_t uid = getuid();
-  if ((uid % AID_USER) < AID_APP) {
-    // Do not target system app
+  // Do not target system app
+  if ((uid % AID_USER) < AID_APP)
     return;
-  }
 
-  static const uint32_t events = instrumentation::Instrumentation::kMethodEntered |
-                                 instrumentation::Instrumentation::kMethodExited |
-                                 instrumentation::Instrumentation::kMethodUnwind |
-                                 instrumentation::Instrumentation::kFieldRead |
-                                 instrumentation::Instrumentation::kFieldWritten |
-                                 instrumentation::Instrumentation::kExceptionCaught |
-                                 kDoCoverage;
   char prefix[100];
   Thread* self = Thread::Current();
   MiniTrace *the_trace;
+  uint32_t log_flag;
   {
     MutexLock mu(self, *Locks::trace_lock_);
     if (the_trace_ != NULL) // Already started
       return;
-    else if (!CreateSocketAndCheckUIDAndPrefix(prefix, uid))
+    else if (!CreateSocketAndCheckUIDAndPrefix(prefix, uid, &log_flag))
       return;
     LOG(INFO) << "MiniTrace: Connection with server was success, received prefix " << prefix;
-    the_trace = the_trace_ = new MiniTrace(events, 1024 * 1024);
+    the_trace = the_trace_ = new MiniTrace(log_flag, 1024 * 1024);
   }
   Runtime* runtime = Runtime::Current();
   the_trace->SetPrefix(prefix);
@@ -285,7 +280,7 @@ void MiniTrace::Start() {
   CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
                                       the_trace),
                                       "Consumer thread");
-  runtime->GetInstrumentation()->AddListener(the_trace, events);
+  runtime->GetInstrumentation()->AddListener(the_trace, log_flag & kInstListener);
   runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
 }
@@ -314,7 +309,7 @@ void MiniTrace::Stop() {
 
     runtime_thread_list->SuspendAll();
     runtime->GetInstrumentation()->DisableMethodTracing();
-    runtime->GetInstrumentation()->RemoveListener(the_trace, the_trace->events_);
+    runtime->GetInstrumentation()->RemoveListener(the_trace, the_trace->log_flag_ & kInstListener);
 
     // Wait for consumer
     if (consumer_thread != NULL) {
@@ -361,9 +356,13 @@ void MiniTrace::Checkout() {
         "consumer thread shutdown");
     the_trace->consumer_tid_ = 0;
 
-    if(!CreateSocketAndCheckUIDAndPrefix(the_trace->prefix_, getuid())) {
+    uint32_t dummy;
+    if(!CreateSocketAndCheckUIDAndPrefix(the_trace->prefix_, getuid(), &dummy)) {
       // @TODO server connection failed, so delete the trace...
       LOG(ERROR) << "MiniTrace: Failed to connect server during Checkout";
+      Stop();
+    } else if (dummy != the_trace->log_flag_) {
+      LOG(ERROR) << "MiniTrace: Logging type is changed";
       Stop();
     } else {
       // restart consumer
@@ -509,12 +508,12 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   return 0;
 }
 
-MiniTrace::MiniTrace(uint32_t events, uint32_t buffer_size)
+MiniTrace::MiniTrace(uint32_t log_flag, uint32_t buffer_size)
     : buf_(new uint8_t[buffer_size]()),
       registered_threads_lock_(new Mutex("MiniTrace thread-ringbuf lock")),
       consumer_runs_(true), consumer_tid_(0),
-      events_(events), do_coverage_((events & kDoCoverage) != 0),
-      do_filter_((events & kDoFilter) != 0), buffer_size_(buffer_size), start_time_(MicroTime()),
+      log_flag_(log_flag), do_coverage_((log_flag & kDoCoverage) != 0),
+      do_filter_((log_flag & kDoFilter) != 0), buffer_size_(buffer_size), start_time_(MicroTime()),
       traced_method_lock_(new Mutex("MiniTrace method lock")),
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")) {
@@ -605,7 +604,7 @@ void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, u
       action = kMiniTraceMethodExit;
       break;
     case instrumentation::Instrumentation::kMethodUnwind:
-      action = kMiniTraceUnroll;
+      action = kMiniTraceUnwind;
       break;
     default:
       UNIMPLEMENTED(FATAL) << "MiniTrace: Unexpected event: " << event;
@@ -656,29 +655,6 @@ void MiniTrace::LogFieldTraceEvent(Thread* thread, mirror::Object *this_object, 
 
   while ((off = ringbuf_acquire(ringbuf_, w, 14)) == -1) {}
   WriteBuffer(buf, off, 14);
-  ringbuf_produce(ringbuf_, w);
-}
-
-void MiniTrace::LogMonitorTraceEvent(Thread* thread, mirror::Object* lock_object,
-    uint32_t dex_pc, bool enter_event) {
-  MiniTraceAction action;
-  if (enter_event) {
-    action = kMiniTraceMonitorEnter;
-  } else {
-    action = kMiniTraceMonitorExit;
-  }
-
-  ringbuf_worker_t *w = GetRingBufWorker();
-  if (w == NULL)
-    return;
-  char buf[10];
-  ssize_t off;
-  Append2LE(buf, thread->GetTid());
-  Append4LE(buf + 2, PointerToLowMemUInt32(lock_object) | action);
-  Append4LE(buf + 6, dex_pc);
-
-  while ((off = ringbuf_acquire(ringbuf_, w, 10)) == -1) {}
-  WriteBuffer(buf, off, 10);
   ringbuf_produce(ringbuf_, w);
 }
 

@@ -54,21 +54,23 @@ namespace mirror {
 class Thread;
 
 class MiniTrace : public instrumentation::InstrumentationListener {
-  enum MiniTraceFlag {
-    kDoMethodEntered =    1 << 0,
-    kDoMethodExited =     1 << 1,
-    kDoMethodUnwind =     1 << 2,
-    kDoDexPcMoved =       1 << 3,
-    kDoFieldRead =        1 << 4,
-    kDoFieldWritten =     1 << 5,
-    kDoExceptionCaught =  1 << 6,
-    kDoMonitorEntered =   1 << 7,
-    kDoMonitorExited =    1 << 8,
-    kDoCoverage =         1 << 9,
-    kDoFilter =           1 << 10,
-  };
-
  public:
+  enum MiniTraceFlag {
+    kDoMethodEntered =    0x00000001,
+    kDoMethodExited =     0x00000002,
+    kDoMethodUnwind =     0x00000004,
+    kDoDexPcMoved =       0x00000008,
+    kDoFieldRead =        0x00000010,
+    kDoFieldWritten =     0x00000020,
+    kDoExceptionCaught =  0x00000040,
+    kInstListener =       0x00000077, /* Currently, DexPcMoved is not used */
+    /* Above flags are used on instrumentation::Instrumentation */
+
+    /* Following flags are used for MiniTrace */
+    kDoCoverage =         0x00000080,
+    kDoFilter =           0x00000100,
+    kFlagAll =            0x000001FF
+  };
   static void Start()
       LOCKS_EXCLUDED(Locks::mutator_lock_,
                      Locks::thread_list_lock_,
@@ -117,22 +119,14 @@ class MiniTrace : public instrumentation::InstrumentationListener {
                        mirror::Throwable* exception_object)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) OVERRIDE;
 
-  // ExtInstrumentationListener implementation.
-  void MonitorEntered(Thread* thread, mirror::Object* lock_object,
-                     uint32_t dex_pc)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void MonitorExited(Thread* thread, mirror::Object* lock_object,
-                    uint32_t dex_pc)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
   static void StoreExitingThreadInfo(Thread* thread);
 
   static void *ConsumerFunction(void *mt_object) LOCKS_EXCLUDED(Locks::trace_lock_);
 
-
   class ArtMethodDetail {
   public:
     ArtMethodDetail(mirror::ArtMethod* method) : method_(method) {
+      // @TODO Is this detail enough? consider argument type & return type
       const char *descriptor = method->GetDeclaringClassDescriptor();
       if (descriptor == NULL)
         classDescriptor_.assign("NoDescriptor");
@@ -204,7 +198,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   };
 
  private:
-  explicit MiniTrace(uint32_t events, uint32_t buffer_size);
+  explicit MiniTrace(uint32_t log_flag, uint32_t buffer_size);
 
   void SetPrefix(const char *prefix) { strcpy(prefix_, prefix); }
 
@@ -280,7 +274,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   std::list<ThreadDetail> threads_not_stored_;
 
   // Events, default open every available events.
-  const uint32_t events_;
+  const uint32_t log_flag_;
 
   // Log execution data
   bool do_coverage_;
