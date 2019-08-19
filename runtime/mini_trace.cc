@@ -271,7 +271,8 @@ void MiniTrace::Start() {
       return;
     else if (!CreateSocketAndCheckUIDAndPrefix(prefix, uid, &log_flag))
       return;
-    LOG(INFO) << "MiniTrace: Connection with server was success, received prefix " << prefix;
+    LOG(INFO) << "MiniTrace: connection success, received prefix="
+        << prefix << " log_flag=" << log_flag;
     the_trace = the_trace_ = new MiniTrace(prefix, log_flag, 1024 * 1024);
   }
   Runtime* runtime = Runtime::Current();

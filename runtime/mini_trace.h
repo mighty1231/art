@@ -198,7 +198,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   };
 
  private:
-  explicit MiniTrace(char *prefix, uint32_t log_flag, uint32_t buffer_size);
+  explicit MiniTrace(const char *prefix, uint32_t log_flag, uint32_t buffer_size);
 
   void LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
                            instrumentation::Instrumentation::InstrumentationEvent event)
