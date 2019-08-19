@@ -139,6 +139,12 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         declaringClassSourceFile_.assign("NoClassSourceFile");
       else
         declaringClassSourceFile_.assign(method->GetDeclaringClassSourceFile());
+      // const DexFile *dexfile = method->GetDexFile();
+      // if (dexfile == NULL) {
+      //   dexFileLocation_.assign("EmptyDexFile");
+      // } else {
+      //   dexFileLocation_.assign(dexfile->GetLocation());
+      // }
     }
     bool operator< (const ArtMethodDetail *other) const {
       return this->method_ < other->method_;
@@ -148,7 +154,15 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         classDescriptor_.c_str(),
         name_.c_str(),
         signature_.c_str(),
-        declaringClassSourceFile_.c_str()));
+        declaringClassSourceFile_.c_str()
+      ));
+      // string.append(StringPrintf("%p\t%s\t%s\t%s\t%s\t%s\n", method_,
+      //   classDescriptor_.c_str(),
+      //   name_.c_str(),
+      //   signature_.c_str(),
+      //   declaringClassSourceFile_.c_str(),
+      //   dexFileLocation_.c_str()
+      // ));
     }
   private:
     mirror::ArtMethod* method_;
@@ -156,6 +170,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     std::string name_;
     std::string signature_;
     std::string declaringClassSourceFile_;
+
+    // std::string dexFileLocation_;
   };
 
   class ArtFieldDetail {
@@ -223,7 +239,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       const std::string &trace_data_filename
     );
 
-  void LogNewMethod(mirror::ArtMethod *method) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  bool LogNewMethod(mirror::ArtMethod *method) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   void LogNewField(mirror::ArtField *field);
   void LogNewThread(Thread *thread);
 
@@ -293,6 +309,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   Mutex *traced_field_lock_;
 
   Mutex *traced_thread_lock_;
+
+  const DexFile *apkDexFile_;
 
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
 };

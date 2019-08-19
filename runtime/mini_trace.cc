@@ -516,7 +516,8 @@ MiniTrace::MiniTrace(const char *prefix, uint32_t log_flag, uint32_t buffer_size
       do_filter_((log_flag & kDoFilter) != 0), buffer_size_(buffer_size), start_time_(MicroTime()),
       traced_method_lock_(new Mutex("MiniTrace method lock")),
       traced_field_lock_(new Mutex("MiniTrace field lock")),
-      traced_thread_lock_(new Mutex("MiniTrace thread lock")) {
+      traced_thread_lock_(new Mutex("MiniTrace thread lock")),
+      apkDexFile_(NULL) {
 
   // Set prefix
   strcpy(prefix_, prefix);
@@ -617,7 +618,10 @@ void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, u
   ringbuf_worker_t *w = GetRingBufWorker();
   if (w == NULL)
     return;
-  LogNewMethod(method);
+  // If log is originated from app file, pass it
+  if (!LogNewMethod(method)) {
+    return;
+  }
 
   char buf[6];
   ssize_t off;
@@ -699,11 +703,19 @@ void MiniTrace::DumpThread(std::string &string) {
   threads_not_stored_.clear();
 }
 
-void MiniTrace::LogNewMethod(mirror::ArtMethod *method) {
+bool MiniTrace::LogNewMethod(mirror::ArtMethod *method) {
+  const DexFile *dxFile = method->GetDexFile();
+  if (apkDexFile_ != NULL && dxFile == apkDexFile_)
+    return false;
+  else if (dxFile->GetLocation().rfind("/data/app/", 0) == 0) {
+    apkDexFile_ = dxFile;
+    return false;
+  }
   MutexLock mu(Thread::Current(), *traced_method_lock_);
   auto it = visited_methods_.insert(method);
   if (it.second)
     methods_not_stored_.emplace_back(method);
+  return true;
 }
 
 void MiniTrace::LogNewField(mirror::ArtField *field) {
