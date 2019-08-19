@@ -272,10 +272,9 @@ void MiniTrace::Start() {
     else if (!CreateSocketAndCheckUIDAndPrefix(prefix, uid, &log_flag))
       return;
     LOG(INFO) << "MiniTrace: Connection with server was success, received prefix " << prefix;
-    the_trace = the_trace_ = new MiniTrace(log_flag, 1024 * 1024);
+    the_trace = the_trace_ = new MiniTrace(prefix, log_flag, 1024 * 1024);
   }
   Runtime* runtime = Runtime::Current();
-  the_trace->SetPrefix(prefix);
   runtime->GetThreadList()->SuspendAll();
   CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
                                       the_trace),
@@ -508,7 +507,7 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   return 0;
 }
 
-MiniTrace::MiniTrace(uint32_t log_flag, uint32_t buffer_size)
+MiniTrace::MiniTrace(const char *prefix, uint32_t log_flag, uint32_t buffer_size)
     : buf_(new uint8_t[buffer_size]()),
       registered_threads_lock_(new Mutex("MiniTrace thread-ringbuf lock")),
       consumer_runs_(true), consumer_tid_(0),
@@ -518,6 +517,10 @@ MiniTrace::MiniTrace(uint32_t log_flag, uint32_t buffer_size)
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")) {
 
+  // Set prefix
+  strcpy(prefix_, prefix);
+
+  // Initialize MPSC ring buffer
   size_t ringbuf_obj_size;
   ringbuf_get_sizes(MAX_THREAD_COUNT, &ringbuf_obj_size, NULL);
 
