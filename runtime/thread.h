@@ -42,7 +42,6 @@
 #include "stack.h"
 #include "thread_state.h"
 #include "throw_location.h"
-#include "ringbuf.h"
 
 namespace art {
 
@@ -92,6 +91,12 @@ enum ThreadFlag {
   kSuspendRequest   = 1,  // If set implies that suspend_count_ > 0 and the Thread should enter the
                           // safepoint handler.
   kCheckpointRequest = 2  // Request that the thread do some checkpoint work and then continue.
+};
+
+enum MiniTraceThreadFlag {
+  kMiniTraceFirstSeen = 0,
+  kMiniTraceMarked = 1,
+  kMiniTraceExclude = 2
 };
 
 static constexpr size_t kNumRosAllocThreadLocalSizeBrackets = 34;
@@ -869,12 +874,12 @@ class Thread {
     return tls32_.handling_method_trace_;
   }
 
-  ringbuf_worker_t *GetRingBufWorker() const {
-    return ringbuf_worker_;
+  void SetMiniTraceFlag(MiniTraceThreadFlag flag) {
+    minitrace_flag = flag;
   }
 
-  void SetRingBufWorker(ringbuf_worker_t *w) {
-    ringbuf_worker_ = w;
+  MiniTraceThreadFlag GetMiniTraceFlag() const {
+    return minitrace_flag;
   }
 
  private:
@@ -1184,8 +1189,8 @@ class Thread {
   // Thread "interrupted" status; stays raised until queried or thrown.
   bool interrupted_ GUARDED_BY(wait_mutex_);
 
-  // ringbuf producer
-  ringbuf_worker_t *ringbuf_worker_;
+  // Whether MiniTrace registered the thread
+  MiniTraceThreadFlag minitrace_flag;
 
   friend class Dbg;  // For SetStateUnsafe.
   friend class gc::collector::SemiSpace;  // For getting stack traces.

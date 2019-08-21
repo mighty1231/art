@@ -63,6 +63,13 @@ enum MiniTraceEventLength {
 };
 
 MiniTrace* volatile MiniTrace::the_trace_ = NULL;
+const char *MiniTrace::threadnames_to_exclude[] = {
+  THREAD_FinalizerDaemon,
+  THREAD_ReferenceQueueDaemon,
+  THREAD_GCDaemon,
+  THREAD_FinalizerWatchdogDaemon,
+  THREAD_HeapTrimmerDaemon
+};
 
 #if _BYTE_ORDER == _LITTLE_ENDIAN
 
@@ -320,11 +327,11 @@ void MiniTrace::Stop() {
     }
 
     // delete trace objects
-    delete the_trace->registered_threads_lock_;
     delete the_trace->traced_method_lock_;
     delete the_trace->traced_field_lock_;
     delete the_trace->traced_thread_lock_;
     delete the_trace->buf_;
+    ringbuf_unregister(the_trace->ringbuf_, 0);
     free(the_trace->ringbuf_);
 
     delete the_trace;
@@ -510,7 +517,6 @@ void *MiniTrace::ConsumerFunction(void *arg) {
 
 MiniTrace::MiniTrace(const char *prefix, uint32_t log_flag, uint32_t buffer_size)
     : buf_(new uint8_t[buffer_size]()),
-      registered_threads_lock_(new Mutex("MiniTrace thread-ringbuf lock")),
       consumer_runs_(true), consumer_tid_(0),
       log_flag_(log_flag), do_coverage_((log_flag & kDoCoverage) != 0),
       do_filter_((log_flag & kDoFilter) != 0), buffer_size_(buffer_size), start_time_(MicroTime()),
@@ -523,12 +529,11 @@ MiniTrace::MiniTrace(const char *prefix, uint32_t log_flag, uint32_t buffer_size
 
   // Initialize MPSC ring buffer
   size_t ringbuf_obj_size;
-  ringbuf_get_sizes(MAX_THREAD_COUNT, &ringbuf_obj_size, NULL);
+  ringbuf_get_sizes(1, &ringbuf_obj_size, NULL);
 
   ringbuf_ = (ringbuf_t *) malloc(ringbuf_obj_size);
-  ringbuf_setup(ringbuf_, MAX_THREAD_COUNT, buffer_size);
-  for (int i=0; i<MAX_THREAD_COUNT; i++)
-    is_registered_[i] = false;
+  ringbuf_setup(ringbuf_, 1, buffer_size);
+  ringbuf_worker_ = ringbuf_register(ringbuf_, 0);
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
@@ -578,8 +583,7 @@ void MiniTrace::ExceptionCaught(Thread* thread, const ThrowLocation& throw_locat
                             mirror::Throwable* exception_object) {
   MiniTraceAction action = kMiniTraceExceptionCaught;
 
-  ringbuf_worker_t *w = GetRingBufWorker();
-  if (w == NULL)
+  if (!RegisterThread())
     return;
   std::string content = exception_object->Dump();
   uint16_t record_size = content.length() + 2 + 4 + 1;
@@ -590,9 +594,9 @@ void MiniTrace::ExceptionCaught(Thread* thread, const ThrowLocation& throw_locat
   Append4LE(buf + 2, (record_size << 3) | action);
   strcpy(buf + 6, content.c_str());
 
-  while ((off = ringbuf_acquire(ringbuf_, w, record_size)) == -1) {}
+  while ((off = ringbuf_acquire(ringbuf_, ringbuf_worker_, record_size)) == -1) {}
   WriteBuffer(buf, off, record_size);
-  ringbuf_produce(ringbuf_, w);
+  ringbuf_produce(ringbuf_, ringbuf_worker_);
 
   delete buf;
 }
@@ -614,8 +618,7 @@ void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, u
       UNIMPLEMENTED(FATAL) << "MiniTrace: Unexpected event: " << event;
   }
 
-  ringbuf_worker_t *w = GetRingBufWorker();
-  if (w == NULL)
+  if (!RegisterThread())
     return;
   LogNewMethod(method);
 
@@ -626,9 +629,9 @@ void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, u
   Append2LE(buf, thread->GetTid());
   Append4LE(buf + 2, method_ptr | action);
 
-  while ((off = ringbuf_acquire(ringbuf_, w, 6)) == -1) {}
+  while ((off = ringbuf_acquire(ringbuf_, ringbuf_worker_, 6)) == -1) {}
   WriteBuffer(buf, off, 6);
-  ringbuf_produce(ringbuf_, w);
+  ringbuf_produce(ringbuf_, ringbuf_worker_);
 }
 
 void MiniTrace::LogFieldTraceEvent(Thread* thread, mirror::Object *this_object, mirror::ArtField* field,
@@ -645,8 +648,7 @@ void MiniTrace::LogFieldTraceEvent(Thread* thread, mirror::Object *this_object, 
     action = kMiniTraceFieldWrite;
   }
 
-  ringbuf_worker_t *w = GetRingBufWorker();
-  if (w == NULL)
+  if (!RegisterThread())
     return;
   LogNewField(field);
 
@@ -657,15 +659,15 @@ void MiniTrace::LogFieldTraceEvent(Thread* thread, mirror::Object *this_object, 
   Append4LE(buf + 6, PointerToLowMemUInt32(this_object));
   Append4LE(buf + 10, dex_pc);
 
-  while ((off = ringbuf_acquire(ringbuf_, w, 14)) == -1) {}
+  while ((off = ringbuf_acquire(ringbuf_, ringbuf_worker_, 14)) == -1) {}
   WriteBuffer(buf, off, 14);
-  ringbuf_produce(ringbuf_, w);
+  ringbuf_produce(ringbuf_, ringbuf_worker_);
 }
 
 void MiniTrace::StoreExitingThreadInfo(Thread* thread) {
   MutexLock mu(thread, *Locks::trace_lock_);
   if (the_trace_ != nullptr) {
-    the_trace_->UnregisterRingBufWorker(thread);
+    the_trace_->UnregisterThread(thread);
   }
 }
 
@@ -808,64 +810,38 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass) {
   }
 }
 
-ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
+/* Register new thread and returns true if the thread is on our interest
+ * otherwise returns false
+ */
+bool MiniTrace::RegisterThread() {
   Thread *self = Thread::Current();
-  if (pthread_self() == consumer_thread_)
-    return NULL;
 
-  ringbuf_worker_t *rworker = self->GetRingBufWorker();
-  if (rworker != NULL) {
-    return rworker;
-  } else {
-    // Not found, so find empty id
+  MiniTraceThreadFlag flag = self->GetMiniTraceFlag();
+  if (flag == kMiniTraceFirstSeen) {
+    if (pthread_self() == consumer_thread_) {
+      self->SetMiniTraceFlag(kMiniTraceExclude);
+      return false;
+    }
     std::string name;
     self->GetThreadName(name);
-    size_t wid;
-    {
-      MutexLock mu(self, *registered_threads_lock_);
-      for (wid=0; wid<MAX_THREAD_COUNT; wid++) {
-        if (is_registered_[wid] == false)
-          break;
+    for (size_t i=0; i<THREAD_TO_EXCLUDE_CNT; i++) {
+      if (name.compare(threadnames_to_exclude[i]) == 0) {
+        self->SetMiniTraceFlag(kMiniTraceExclude);
+        return false;
       }
-      CHECK(wid != MAX_THREAD_COUNT); // Too many threads
-
-      rworker = ringbuf_register(ringbuf_, wid);
-      registered_threads_[self] = rworker;
-      is_registered_[wid] = true;
-      self->SetRingBufWorker(rworker);
     }
     {
       MutexLock mu(self, *traced_thread_lock_);
       threads_not_stored_.emplace_back(self->GetTid(), name);
     }
-    LOG(INFO) << StringPrintf("MiniTrace: Register ringbuf worker [tid=%d name=\"%s\" wid=%zu rworker=%p]",
-        self->GetTid(), name.c_str(), wid, rworker);
-    return rworker;
+    self->SetMiniTraceFlag(kMiniTraceMarked);
+    return true;
   }
+  return (flag == kMiniTraceMarked);
 }
 
-void MiniTrace::UnregisterRingBufWorker(Thread *thread) {
-  Thread *self = Thread::Current();
-  if (pthread_self() == consumer_thread_)
-    return;
-
-  std::string name;
-  thread->GetThreadName(name);
-  std::map<Thread *, ringbuf_worker_t *>::iterator it;
-  size_t wid;
-  {
-    MutexLock mu(self, *registered_threads_lock_);
-    it = registered_threads_.find(thread);
-    CHECK(it != registered_threads_.end());
-    wid = ringbuf_w2i(ringbuf_, it->second);
-
-    ringbuf_unregister(ringbuf_, it->second);
-    registered_threads_.erase(it);
-    is_registered_[wid] = false;
-    thread->SetRingBufWorker(NULL);
-  }
-  LOG(INFO) << StringPrintf("MiniTrace: Unregister ringbuf worker [tid=%d name=\"%s\" wid=%zu]",
-      thread->GetTid(), name.c_str(), wid);
+void MiniTrace::UnregisterThread(Thread *thread) {
+  CHECK_EQ(thread, Thread::Current());
 }
 
 }  // namespace art

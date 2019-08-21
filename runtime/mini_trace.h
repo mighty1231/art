@@ -41,8 +41,6 @@
 #include "ringbuf.h"
 #include "base/mutex.h"
 
-// MAX_THREAD_COUNT may not be enough.
-#define MAX_THREAD_COUNT 96
 namespace art {
 
 namespace mirror {
@@ -243,17 +241,25 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   ringbuf_t *ringbuf_;
 
   // Manages all threads and ringbuf workers
-  Mutex *registered_threads_lock_;
-  std::map<Thread *, ringbuf_worker_t *> registered_threads_;
-  bool is_registered_[MAX_THREAD_COUNT];
+  ringbuf_worker_t *ringbuf_worker_;
+
+  // Threads to avoid log
+  static constexpr const int THREAD_TO_EXCLUDE_CNT = 5;
+  static constexpr const char *THREAD_FinalizerWatchdogDaemon = "FinalizerWatchdogDaemon";
+  static constexpr const char *THREAD_ReferenceQueueDaemon = "ReferenceQueueDaemon";
+  static constexpr const char *THREAD_FinalizerDaemon = "FinalizerDaemon";
+  static constexpr const char *THREAD_GCDaemon = "GCDaemon";
+  static constexpr const char *THREAD_HeapTrimmerDaemon = "HeapTrimmerDaemon";
+
+  static const char *threadnames_to_exclude[THREAD_TO_EXCLUDE_CNT];
 
   // Used for consumer - MiniTrace synchronization
   pthread_t consumer_thread_;
   volatile bool consumer_runs_;
   pid_t consumer_tid_;
 
-  ringbuf_worker_t *GetRingBufWorker();
-  void UnregisterRingBufWorker(Thread *thread);
+  bool RegisterThread();
+  void UnregisterThread(Thread *thread);
 
   // Buffer to store trace method data.
   std::list<ArtMethodDetail> methods_not_stored_;
