@@ -1105,7 +1105,7 @@ void Thread::Shutdown() {
 }
 
 Thread::Thread(bool daemon) : tls32_(daemon), wait_monitor_(nullptr), interrupted_(false),
-    minitrace_flag(kMiniTraceFirstSeen) {
+    minitrace_flag(kMiniTraceFirstSeen), ringbuf_worker_(nullptr) {
   wait_mutex_ = new Mutex("a thread wait mutex");
   wait_cond_ = new ConditionVariable("a thread wait condition variable", *wait_mutex_);
   tlsPtr_.debug_invoke_req = new DebugInvokeReq;

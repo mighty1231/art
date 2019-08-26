@@ -42,6 +42,7 @@
 #include "stack.h"
 #include "thread_state.h"
 #include "throw_location.h"
+#include "ringbuf.h"
 
 namespace art {
 
@@ -882,6 +883,14 @@ class Thread {
     return minitrace_flag;
   }
 
+  ringbuf_worker_t *GetRingBufWorker() const {
+    return ringbuf_worker_;
+  }
+
+  void SetRingBufWorker(ringbuf_worker_t *worker) {
+    ringbuf_worker_ = worker;
+  }
+
  private:
   explicit Thread(bool daemon);
   ~Thread() LOCKS_EXCLUDED(Locks::mutator_lock_,
@@ -1191,6 +1200,8 @@ class Thread {
 
   // Whether MiniTrace registered the thread
   MiniTraceThreadFlag minitrace_flag;
+
+  ringbuf_worker_t *ringbuf_worker_;
 
   friend class Dbg;  // For SetStateUnsafe.
   friend class gc::collector::SemiSpace;  // For getting stack traces.

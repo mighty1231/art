@@ -41,6 +41,8 @@
 #include "ringbuf.h"
 #include "base/mutex.h"
 
+// MAX_THREAD_COUNT may not be enough
+#define MAX_THREAD_COUNT 256
 namespace art {
 
 namespace mirror {
@@ -240,8 +242,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   // manages buf, as ring buffer
   ringbuf_t *ringbuf_;
 
-  // Manages all threads and ringbuf workers
-  ringbuf_worker_t *ringbuf_worker_;
+  // // Manages all threads and ringbuf workers
+  Mutex *wids_registered_lock_;
+  bool wids_registered_[MAX_THREAD_COUNT];
 
   // Threads to avoid log
   static constexpr const int THREAD_TO_EXCLUDE_CNT = 5;
@@ -258,7 +261,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   volatile bool consumer_runs_;
   pid_t consumer_tid_;
 
-  bool RegisterThread();
+  ringbuf_worker_t *GetRingBufWorker();
   void UnregisterThread(Thread *thread);
 
   // Buffer to store trace method data.
