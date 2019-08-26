@@ -245,10 +245,10 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   // Threads to avoid log
   static constexpr const int THREAD_TO_EXCLUDE_CNT = 5;
-  static constexpr const char *THREAD_FinalizerWatchdogDaemon = "FinalizerWatchdogDaemon";
-  static constexpr const char *THREAD_ReferenceQueueDaemon = "ReferenceQueueDaemon";
   static constexpr const char *THREAD_FinalizerDaemon = "FinalizerDaemon";
+  static constexpr const char *THREAD_ReferenceQueueDaemon = "ReferenceQueueDaemon";
   static constexpr const char *THREAD_GCDaemon = "GCDaemon";
+  static constexpr const char *THREAD_FinalizerWatchdogDaemon = "FinalizerWatchdogDaemon";
   static constexpr const char *THREAD_HeapTrimmerDaemon = "HeapTrimmerDaemon";
 
   static const char *threadnames_to_exclude[THREAD_TO_EXCLUDE_CNT];
@@ -299,6 +299,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   Mutex *traced_field_lock_;
 
   Mutex *traced_thread_lock_;
+
+  JNIEnvExt *env_;
+  const JValue *main_looper_;
 
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
 };

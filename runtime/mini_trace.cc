@@ -392,6 +392,11 @@ TracingMode MiniTrace::GetMethodTracingMode() {
 }
 
 void *MiniTrace::ConsumerFunction(void *arg) {
+  // @TODO
+  // Consider making a new file on checkout.
+  // data.bin would be new file,
+  // but function/thread/field informations do not necessary
+  // some bugs should be on my loggings...
   MiniTrace *the_trace = (MiniTrace *)arg;
   Runtime* runtime = Runtime::Current();
   CHECK(runtime->AttachCurrentThread("Consumer", true, runtime->GetSystemThreadGroup(),
@@ -522,7 +527,8 @@ MiniTrace::MiniTrace(const char *prefix, uint32_t log_flag, uint32_t buffer_size
       do_filter_((log_flag & kDoFilter) != 0), buffer_size_(buffer_size), start_time_(MicroTime()),
       traced_method_lock_(new Mutex("MiniTrace method lock")),
       traced_field_lock_(new Mutex("MiniTrace field lock")),
-      traced_thread_lock_(new Mutex("MiniTrace thread lock")) {
+      traced_thread_lock_(new Mutex("MiniTrace thread lock")),
+      main_looper_(NULL) {
 
   // Set prefix
   strcpy(prefix_, prefix);
@@ -534,6 +540,8 @@ MiniTrace::MiniTrace(const char *prefix, uint32_t log_flag, uint32_t buffer_size
   ringbuf_ = (ringbuf_t *) malloc(ringbuf_obj_size);
   ringbuf_setup(ringbuf_, 1, buffer_size);
   ringbuf_worker_ = ringbuf_register(ringbuf_, 0);
+
+  env_ = Thread::Current()->GetJniEnv();
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
@@ -562,15 +570,35 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
 void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
                          mirror::ArtMethod* method, uint32_t dex_pc,
                          const JValue& return_value) {
-  UNUSED(return_value);
   LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodExited);
 
-  // log for android.app.activity performDestroy and performPause
-  // if (PrettyDescriptor(method->GetDeclaringClassDescriptor()).compare("android.app.Activity") == 0) {
-  //   if (strcmp(method->GetName(), "performDestroy") == 0 || strcmp(method->GetName(), "performPause") == 0)
-  //       ??
-  // }
-  // @TODO Should I wait for at least one loop for consumer thread?
+  if (main_looper_ == NULL) {
+    std::string name = method->GetName();
+    if (name.compare("myLooper") == 0) {
+      // mirror::Object *main_looper = return_value.GetL();
+
+      // main_looper_ = &return_value;
+      // LOG(INFO) << "gogo";
+      // ScopedLocalRef<jclass> logprinterClass(env_, env_->FindClass("android.util.LogPrinter"));
+      // LOG(INFO) << "LogPrinter complete";
+      // ScopedLocalRef<jclass> looperClass(env_, env_->FindClass("android.os.Looper"));
+      // LOG(INFO) << "Looper complete";
+
+      // const jmethodID lpCtor = env_->GetMethodID(logprinterClass.get(), "<init>", "(ILjava/lang/String;)V");
+      // jobject logPrinter = env_->NewObject(logprinterClass.get(), lpCtor, 3, env_->NewStringUTF("MainLooper")); // Log.DEBUG is 3
+
+      // jmethodID setMessageLoggingFunc = env_->GetMethodID(looperClass.get(), "setMessageLogging", "(Landroid/util/Printer;)V");
+      // env_->CallVoidMethod(main_looper_, setMessageLoggingFunc, logPrinter);
+    }
+  }
+  /* 
+  import android.util.LogPrinter;
+  Looper looper = myLooper();
+  looper.setMessageLogging(new LogPrinter(Log.DEBUG, "MainLooper"));
+  mutator_lock...
+  */
+  // Locks::mutator_lock_->ExclusiveUnlock(Thread::Current());
+  // Locks::mutator_lock_->ExclusiveLock(Thread::Current());
 }
 
 void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
