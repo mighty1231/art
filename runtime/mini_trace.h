@@ -198,7 +198,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   };
 
  private:
-  explicit MiniTrace(const char *prefix, uint32_t log_flag, uint32_t buffer_size);
+  explicit MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag, uint32_t buffer_size);
 
   void LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
                            instrumentation::Instrumentation::InstrumentationEvent event)
@@ -232,6 +232,13 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   // Singleton instance of the Trace or NULL when no method tracing is active.
   static MiniTrace* volatile the_trace_ GUARDED_BY(Locks::trace_lock_);
+
+  // Socket fd connect with mtserver
+  // The consumer thread should close it
+  int socket_fd_;
+
+  // File index on binary file for logs
+  volatile int data_bin_index_;
 
   // Prefix for log info and data
   char prefix_[100];

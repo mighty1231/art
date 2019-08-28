@@ -120,12 +120,12 @@ static int read_with_timeout (int socket_fd, void *buf, int size, int timeout_se
   return total_written;
 }
 
-static bool CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid, uint32_t *log_flag) {
+static int CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid, uint32_t *log_flag) {
   int socket_fd;
   sockaddr_un server_addr;
   if ((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
     PLOG(ERROR) << "MiniTrace: socket " << errno;
-    return false;
+    return -1;
   }
 
   memset(&server_addr, 0, sizeof server_addr);
@@ -136,7 +136,7 @@ static bool CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid, uint32_t *log
   if (connect(socket_fd, (sockaddr *)&server_addr, addrlen) < 0) {
     PLOG(ERROR) << "MiniTrace: connect " << errno;
     close(socket_fd);
-    return false;
+    return -1;
   }
   LOG(INFO) << "MiniTrace: connect success!";
 
@@ -159,8 +159,7 @@ static bool CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid, uint32_t *log
         if (written == 4 && prefix_length > 0 && prefix_length < 256) {
           written = read_with_timeout(socket_fd, buf, prefix_length + 1, 3);
           if (written == prefix_length + 1) {
-            close(socket_fd);
-            return true;
+            return socket_fd;
           } else {
             LOG(ERROR) << "MiniTrace: Read Prefix " << errno;
           }
@@ -177,63 +176,7 @@ static bool CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid, uint32_t *log
     PLOG(ERROR) << "MiniTrace: Read UID " << errno;
   }
   close(socket_fd);
-  return false;
-}
-
-bool MiniTrace::CreateSocketAndAlertTheEnd(
-    const std::string &trace_method_info_filename,
-    const std::string &trace_field_info_filename,
-    const std::string &trace_thread_info_filename,
-    const std::string &trace_data_filename
-  ) {
-  int socket_fd;
-  sockaddr_un server_addr;
-  if ((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
-    PLOG(ERROR) << "MiniTrace: socket " << errno;
-    return false;
-  }
-
-  memset(&server_addr, 0, sizeof server_addr);
-  server_addr.sun_family = AF_UNIX;
-  strcpy(&server_addr.sun_path[1], "/dev/mt/server");
-  int addrlen = sizeof server_addr.sun_family + strlen(&server_addr.sun_path[1]) + 1;
-
-  if (connect(socket_fd, (sockaddr *)&server_addr, addrlen) < 0) {
-    PLOG(ERROR) << "MiniTrace: connect " << errno;
-    close(socket_fd);
-    return false;
-  }
-  LOG(INFO) << "MiniTrace: connect success!";
-
-  uid_t targetuid;
-  int written = read_with_timeout(socket_fd, &targetuid, sizeof (uid_t), 3);
-  if (written == sizeof (uid_t)) {
-    // check uid
-    LOG(INFO) << "MiniTrace: read success on uid " << getuid();
-    if (targetuid == getuid()) {
-      int32_t pid = getpid();
-      int32_t SPECIAL_VALUE = 0xDEAD;
-      write(socket_fd, &pid, 4);
-      write(socket_fd, &SPECIAL_VALUE, 4);
-
-      LOG(INFO) << "data method info name " << trace_method_info_filename;
-      write(socket_fd, trace_method_info_filename.c_str(), trace_method_info_filename.length() + 1);
-      LOG(INFO) << "data field info name " << trace_field_info_filename;
-      write(socket_fd, trace_field_info_filename.c_str(), trace_field_info_filename.length() + 1);
-      LOG(INFO) << "data thread info name " << trace_thread_info_filename;
-      write(socket_fd, trace_thread_info_filename.c_str(), trace_thread_info_filename.length() + 1);
-      LOG(INFO) << "info file name " << trace_data_filename;
-      write(socket_fd, trace_data_filename.c_str(), trace_data_filename.length() + 1);
-      close(socket_fd);
-      return true;
-    } else {
-      PLOG(INFO) << "MiniTrace: Mismatch UID " << targetuid << " != " << getuid();
-    }
-  } else {
-    PLOG(ERROR) << "MiniTrace: Read UID " << errno;
-  }
-  close(socket_fd);
-  return false;
+  return -1;
 }
 
 void MiniTrace::ReadBuffer(char *dest, size_t offset, size_t len) {
@@ -276,11 +219,13 @@ void MiniTrace::Start() {
     MutexLock mu(self, *Locks::trace_lock_);
     if (the_trace_ != NULL) // Already started
       return;
-    else if (!CreateSocketAndCheckUIDAndPrefix(prefix, uid, &log_flag))
+
+    int socket_fd = CreateSocketAndCheckUIDAndPrefix(prefix, uid, &log_flag);
+    if (socket_fd == -1)
       return;
     LOG(INFO) << "MiniTrace: connection success, received prefix="
         << prefix << " log_flag=" << log_flag;
-    the_trace = the_trace_ = new MiniTrace(prefix, log_flag, 1024 * 1024);
+    the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, 1024 * 1024);
   }
   Runtime* runtime = Runtime::Current();
   runtime->GetThreadList()->SuspendAll();
@@ -356,28 +301,8 @@ void MiniTrace::Checkout() {
   if (the_trace == NULL)
     Start();
   else {
-    // Wait consumer thread
     LOG(INFO) << "MiniTrace: Checkout called";
-    the_trace->consumer_runs_ = false;
-    CHECK_PTHREAD_CALL(pthread_join, (the_trace->consumer_thread_, NULL), 
-        "consumer thread shutdown");
-    the_trace->consumer_tid_ = 0;
-
-    uint32_t dummy;
-    if(!CreateSocketAndCheckUIDAndPrefix(the_trace->prefix_, getuid(), &dummy)) {
-      // @TODO server connection failed, so delete the trace...
-      LOG(ERROR) << "MiniTrace: Failed to connect server during Checkout";
-      Stop();
-    } else if (dummy != the_trace->log_flag_) {
-      LOG(ERROR) << "MiniTrace: Logging type is changed";
-      Stop();
-    } else {
-      // restart consumer
-      the_trace->consumer_runs_ = true;
-      CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
-                                          the_trace),
-                                          "Consumer thread");
-    }
+    the_trace->data_bin_index_ ++;
   }
 }
 
@@ -407,7 +332,9 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   the_trace->consumer_tid_ = self->GetTid();
 
   // Create empty file to log data
-  std::string trace_data_filename(StringPrintf("%sdata.bin", the_trace->prefix_));
+  int last_bin_index = the_trace->data_bin_index_;
+  std::string trace_data_filename(StringPrintf("%sdata_%d.bin",
+      the_trace->prefix_, last_bin_index));
   std::string trace_method_info_filename(StringPrintf("%sinfo_m.log", the_trace->prefix_));
   std::string trace_field_info_filename(StringPrintf("%sinfo_f.log", the_trace->prefix_));
   std::string trace_thread_info_filename(StringPrintf("%sinfo_t.log", the_trace->prefix_));
@@ -428,6 +355,19 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   size_t len, woff;
   std::string buffer;
   while (the_trace->consumer_runs_) {
+    // If data_bin_index_ is modified from Checkout, handle for it
+    if (last_bin_index != the_trace->data_bin_index_) {
+      // release and send its filename to socket
+      CHECK(trace_data_file_->Flush() == 0);
+      CHECK(trace_data_file_->Close() == 0);
+      write(the_trace->socket_fd_, trace_data_filename.c_str(), trace_data_filename.length() + 1);
+      last_bin_index = the_trace->data_bin_index_;
+      trace_data_filename.assign(StringPrintf("%sdata_%d.bin",
+          the_trace->prefix_, last_bin_index));
+      trace_data_file_ = OS::CreateEmptyFile(trace_data_filename.c_str());
+      CHECK(trace_data_file_ != NULL);
+    }
+
     // Dump Buffer
     len = ringbuf_consume(the_trace->ringbuf_, &woff);
     if (len > 0) {
@@ -508,20 +448,22 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   CHECK(trace_thread_info_file_->Flush() == 0);
   CHECK(trace_thread_info_file_->Close() == 0);
 
-  if (!the_trace->CreateSocketAndAlertTheEnd(
-        trace_method_info_filename,
-        trace_field_info_filename,
-        trace_thread_info_filename,
-        trace_data_filename
-      )) {
-    LOG(ERROR) << "MiniTrace: Alerting the end failed.";
-  }
+  write(the_trace->socket_fd_, trace_method_info_filename.c_str(),
+      trace_method_info_filename.length() + 1);
+  write(the_trace->socket_fd_, trace_field_info_filename.c_str(),
+      trace_field_info_filename.length() + 1);
+  write(the_trace->socket_fd_, trace_thread_info_filename.c_str(),
+      trace_thread_info_filename.length() + 1);
+  write(the_trace->socket_fd_, trace_data_filename.c_str(),
+      trace_data_filename.length() + 1);
   runtime->DetachCurrentThread();
   return 0;
 }
 
-MiniTrace::MiniTrace(const char *prefix, uint32_t log_flag, uint32_t buffer_size)
-    : buf_(new uint8_t[buffer_size]()),
+MiniTrace::MiniTrace(int socket_fd, const char *prefix,
+        uint32_t log_flag, uint32_t buffer_size)
+    : socket_fd_(socket_fd), data_bin_index_(0),
+      buf_(new uint8_t[buffer_size]()),
       wids_registered_lock_(new Mutex("Ringbuf worker lock")),
       consumer_runs_(true), consumer_tid_(0),
       log_flag_(log_flag), do_coverage_((log_flag & kDoCoverage) != 0),
