@@ -579,30 +579,18 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
   if (main_looper_ == NULL) {
     std::string name = method->GetName();
     if (name.compare("myLooper") == 0) {
-      // mirror::Object *main_looper = return_value.GetL();
 
-      // main_looper_ = &return_value;
-      // LOG(INFO) << "gogo";
-      // ScopedLocalRef<jclass> logprinterClass(env_, env_->FindClass("android.util.LogPrinter"));
-      // LOG(INFO) << "LogPrinter complete";
-      // ScopedLocalRef<jclass> looperClass(env_, env_->FindClass("android.os.Looper"));
-      // LOG(INFO) << "Looper complete";
+      main_looper_ = &return_value;
+      jclass logprinterClass = env_->FindClass("android/util/LogPrinter");
+      jclass looperClass = env_->FindClass("android/os/Looper");
 
-      // const jmethodID lpCtor = env_->GetMethodID(logprinterClass.get(), "<init>", "(ILjava/lang/String;)V");
-      // jobject logPrinter = env_->NewObject(logprinterClass.get(), lpCtor, 3, env_->NewStringUTF("MainLooper")); // Log.DEBUG is 3
+      const jmethodID lpCtor = env_->GetMethodID(logprinterClass, "<init>", "(ILjava/lang/String;)V");
+      jobject logPrinter = env_->NewObject(logprinterClass, lpCtor, 3, env_->NewStringUTF("MainLooper")); // Log.DEBUG is 3
 
-      // jmethodID setMessageLoggingFunc = env_->GetMethodID(looperClass.get(), "setMessageLogging", "(Landroid/util/Printer;)V");
-      // env_->CallVoidMethod(main_looper_, setMessageLoggingFunc, logPrinter);
+      jmethodID setMessageLoggingFunc = env_->GetMethodID(looperClass, "setMessageLogging", "(Landroid/util/Printer;)V");
+      env_->CallVoidMethod(env_->NewLocalRef(return_value.GetL()), setMessageLoggingFunc, logPrinter);
     }
   }
-  /* 
-  import android.util.LogPrinter;
-  Looper looper = myLooper();
-  looper.setMessageLogging(new LogPrinter(Log.DEBUG, "MainLooper"));
-  mutator_lock...
-  */
-  // Locks::mutator_lock_->ExclusiveUnlock(Thread::Current());
-  // Locks::mutator_lock_->ExclusiveLock(Thread::Current());
 }
 
 void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
