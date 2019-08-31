@@ -232,6 +232,9 @@ void MiniTrace::Start() {
   CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
                                       the_trace),
                                       "Consumer thread");
+  CHECK_PTHREAD_CALL(pthread_create, (&the_trace->idlechecker_thread_, NULL, &IdleChecker,
+                                      the_trace),
+                                      "IdleChecker thread");
   runtime->GetInstrumentation()->AddListener(the_trace, log_flag & kInstListener);
   runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
@@ -317,11 +320,6 @@ TracingMode MiniTrace::GetMethodTracingMode() {
 }
 
 void *MiniTrace::ConsumerFunction(void *arg) {
-  // @TODO
-  // Consider making a new file on checkout.
-  // data.bin would be new file,
-  // but function/thread/field informations do not necessary
-  // some bugs should be on my loggings...
   MiniTrace *the_trace = (MiniTrace *)arg;
   Runtime* runtime = Runtime::Current();
   CHECK(runtime->AttachCurrentThread("Consumer", true, runtime->GetSystemThreadGroup(),
@@ -457,7 +455,52 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   write(the_trace->socket_fd_, trace_data_filename.c_str(),
       trace_data_filename.length() + 1);
   runtime->DetachCurrentThread();
-  return 0;
+  return NULL;
+}
+
+void *MiniTrace::IdleChecker(void *arg) {
+  MiniTrace *the_trace = (MiniTrace *)arg;
+  Runtime* runtime = Runtime::Current();
+  CHECK(runtime->AttachCurrentThread("IdleChecker", true, runtime->GetSystemThreadGroup(),
+                                       !runtime->IsCompiler()));
+
+  Thread *self = Thread::Current();
+  LOG(INFO) << "MiniTrace IdleChecker tid " << self->GetTid();
+  // the_trace->consumer_tid_ = self->GetTid();
+
+  // wait for first message taken, in order to wait initialization of various objects 
+  while (the_trace->msg_taken_ == false || the_trace->instrumentation_taken_ == false) {
+    usleep(500000); // 0.5 second
+  }
+  LOG(INFO) << "MiniTraceIdleChecker: First message taken";
+
+  // Instrumentation instrumentation =
+  //    ActivityThread.currentActivityThread().getInstrumentation();
+  JNIEnvExt *env = self->GetJniEnv();
+  jclass activityThreadClass = env->FindClass("android/app/ActivityThread");
+  jclass instrumentationClass = env->FindClass("android/app/Instrumentation");
+  jmethodID currentActivityThread = env->GetStaticMethodID(activityThreadClass, "currentActivityThread", "()Landroid/app/ActivityThread;");
+  jobject at = env->CallStaticObjectMethod(activityThreadClass, currentActivityThread);
+
+  jmethodID getInstrumentation = env->GetMethodID(activityThreadClass, "getInstrumentation", "()Landroid/app/Instrumentation;");
+  jobject instrumentation = env->CallObjectMethod(at, getInstrumentation);
+
+  jmethodID waitForIdleSync = env->GetMethodID(instrumentationClass, "waitForIdleSync", "()V");
+
+  while (1) {
+    the_trace->msg_taken_ = false;
+    env->CallVoidMethod(instrumentation, waitForIdleSync);
+    LOG(INFO) << "MiniTraceIdleChecker: Idle!";
+
+    while (!the_trace->msg_taken_) {
+      usleep(100000); // 0.1 second
+    }
+    at = env->CallStaticObjectMethod(activityThreadClass, currentActivityThread);
+    instrumentation = env->CallObjectMethod(at, getInstrumentation);
+  }
+
+  runtime->DetachCurrentThread();
+  return NULL;
 }
 
 MiniTrace::MiniTrace(int socket_fd, const char *prefix,
@@ -471,7 +514,9 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
       traced_method_lock_(new Mutex("MiniTrace method lock")),
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")),
-      main_looper_(NULL) {
+      main_looper_(NULL),
+      method_message_next_(NULL), main_message_(NULL),
+      idlechecker_thread_(0), msg_taken_(false), instrumentation_taken_(false) {
 
   // Set prefix
   strcpy(prefix_, prefix);
@@ -518,19 +563,44 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
                          const JValue& return_value) {
   LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodExited);
 
-  if (main_looper_ == NULL) {
+  if (UNLIKELY(main_looper_ == NULL)) {
     std::string name = method->GetName();
     if (name.compare("myLooper") == 0) {
 
       main_looper_ = &return_value;
-      jclass logprinterClass = env_->FindClass("android/util/LogPrinter");
-      jclass looperClass = env_->FindClass("android/os/Looper");
 
-      const jmethodID lpCtor = env_->GetMethodID(logprinterClass, "<init>", "(ILjava/lang/String;)V");
-      jobject logPrinter = env_->NewObject(logprinterClass, lpCtor, 3, env_->NewStringUTF("MainLooper")); // Log.DEBUG is 3
+      ScopedLocalRef<jclass> logprinterClass(env_, env_->FindClass("android/util/LogPrinter"));
+      ScopedLocalRef<jclass> looperClass(env_, env_->FindClass("android/os/Looper"));
 
-      jmethodID setMessageLoggingFunc = env_->GetMethodID(looperClass, "setMessageLogging", "(Landroid/util/Printer;)V");
-      env_->CallVoidMethod(env_->NewLocalRef(return_value.GetL()), setMessageLoggingFunc, logPrinter);
+      jmethodID lpCtor = env_->GetMethodID(logprinterClass.get(), "<init>", "(ILjava/lang/String;)V");
+      ScopedLocalRef<jstring> tag(env_, env_->NewStringUTF("MainLooper"));
+      ScopedLocalRef<jobject> logPrinter(env_, env_->NewObject(logprinterClass.get(), lpCtor, 3, tag.get())); // Log.DEBUG is 3
+
+      jmethodID setMessageLoggingFunc = env_->GetMethodID(looperClass.get(), "setMessageLogging", "(Landroid/util/Printer;)V");
+      jobject mainLooper = env_->NewLocalRef(return_value.GetL());
+      env_->CallVoidMethod(mainLooper, setMessageLoggingFunc, logPrinter.get());
+      env_->DeleteLocalRef(mainLooper);
+    }
+  }
+  // Assume the first called next() is called with MessageQueue from main thread
+  if (UNLIKELY(method_message_next_ == NULL)) {
+    if (strcmp(method->GetDeclaringClassDescriptor(), "Landroid/os/MessageQueue;") == 0) {
+      std::string name = method->GetName();
+      if (name.compare("next") == 0) {
+        method_message_next_ = method;
+        main_message_ = this_object;
+        msg_taken_ = true;
+      }
+    }
+  } else if (UNLIKELY(method_message_next_ == method && main_message_ == this_object)) {
+    msg_taken_ = true;
+    // LOG(INFO) << "MiniTrace: MessageQueue.next()";
+  }
+
+  if (UNLIKELY(instrumentation_taken_ == false)) {
+    std::string name = method->GetName();
+    if (name.compare("getInstrumentation") == 0) {
+      instrumentation_taken_ = true;
     }
   }
 }
@@ -783,7 +853,8 @@ ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
 
   MiniTraceThreadFlag flag = self->GetMiniTraceFlag();
   if (flag == kMiniTraceFirstSeen) {
-    if (pthread_self() == consumer_thread_) {
+    pthread_t pself = pthread_self();
+    if (pself == consumer_thread_ || pself == idlechecker_thread_) {
       self->SetMiniTraceFlag(kMiniTraceExclude);
       return NULL;
     }

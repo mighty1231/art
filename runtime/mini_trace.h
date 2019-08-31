@@ -122,6 +122,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   static void StoreExitingThreadInfo(Thread* thread);
 
   static void *ConsumerFunction(void *mt_object) LOCKS_EXCLUDED(Locks::trace_lock_);
+  static void *IdleChecker(void *mt_object);
 
   class ArtMethodDetail {
   public:
@@ -216,13 +217,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   void DumpField(std::string &buffer); // SHARED_LOCKS_REQUIRED(this->traced_field_lock_)
   void DumpThread(std::string &buffer); // SHARED_LOCKS_REQUIRED(this->traced_thread_lock_)
 
-  bool CreateSocketAndAlertTheEnd(
-      const std::string &trace_method_info_filename,
-      const std::string &trace_field_info_filename,
-      const std::string &trace_thread_info_filename,
-      const std::string &trace_data_filename
-    );
-
   void LogNewMethod(mirror::ArtMethod *method) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   void LogNewField(mirror::ArtField *field);
   void LogNewThread(Thread *thread);
@@ -312,6 +306,13 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   JNIEnvExt *env_;
   const JValue *main_looper_;
+
+  // idle checking loop
+  mirror::ArtMethod *method_message_next_;
+  mirror::Object *main_message_;
+  pthread_t idlechecker_thread_;
+  volatile bool msg_taken_;
+  volatile bool instrumentation_taken_;
 
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
 };
