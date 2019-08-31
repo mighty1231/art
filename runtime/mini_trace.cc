@@ -465,38 +465,65 @@ void *MiniTrace::IdleChecker(void *arg) {
                                        !runtime->IsCompiler()));
 
   Thread *self = Thread::Current();
+  JNIEnvExt *env = self->GetJniEnv();
   LOG(INFO) << "MiniTrace IdleChecker tid " << self->GetTid();
   // the_trace->consumer_tid_ = self->GetTid();
 
   // wait for first message taken, in order to wait initialization of various objects 
-  while (the_trace->msg_taken_ == false || the_trace->instrumentation_taken_ == false) {
+  while (the_trace->msg_taken_ == false) {
     usleep(500000); // 0.5 second
   }
   LOG(INFO) << "MiniTraceIdleChecker: First message taken";
 
-  // Instrumentation instrumentation =
-  //    ActivityThread.currentActivityThread().getInstrumentation();
-  JNIEnvExt *env = self->GetJniEnv();
-  jclass activityThreadClass = env->FindClass("android/app/ActivityThread");
-  jclass instrumentationClass = env->FindClass("android/app/Instrumentation");
-  jmethodID currentActivityThread = env->GetStaticMethodID(activityThreadClass, "currentActivityThread", "()Landroid/app/ActivityThread;");
-  jobject at = env->CallStaticObjectMethod(activityThreadClass, currentActivityThread);
+  // Wait for idle state of MainLooper
+  // Technique from Instrumentation$waitForIdleSync
+  // mainLooper = Looper.getMainLooper();
+  // mainQueue = mainlooper.getQueue();
+  // mainHandler = new Handler(mainLooper);
+  ScopedLocalRef<jclass> looperClass(env, env->FindClass("android/os/Looper"));
+  ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
+  ScopedLocalRef<jclass> handlerClass(env, env->FindClass("android/os/Handler"));
+  ScopedLocalRef<jclass> idlerClass(env, env->FindClass("android/app/Instrumentation$Idler"));
+  ScopedLocalRef<jclass> emptyRunnableClass(env, env->FindClass("android/app/Instrumentation$EmptyRunnable"));
 
-  jmethodID getInstrumentation = env->GetMethodID(activityThreadClass, "getInstrumentation", "()Landroid/app/Instrumentation;");
-  jobject instrumentation = env->CallObjectMethod(at, getInstrumentation);
+  jmethodID getMainLooper = env->GetStaticMethodID(looperClass.get(),
+      "getMainLooper", "()Landroid/os/Looper;");
+  jmethodID getQueue = env->GetMethodID(looperClass.get(),
+      "getQueue", "()Landroid/os/MessageQueue;");
+  jmethodID addIdleHandler = env->GetMethodID(queueClass.get(),
+      "addIdleHandler", "(Landroid/os/MessageQueue$IdleHandler;)V");
+  jmethodID handlerInit = env->GetMethodID(handlerClass.get(),
+      "<init>", "(Landroid/os/Looper;)V");
+  jmethodID post = env->GetMethodID(handlerClass.get(),
+      "post", "(Ljava/lang/Runnable;)Z");
+  jmethodID idlerInit = env->GetMethodID(idlerClass.get(),
+      "<init>", "(Ljava/lang/Runnable;)V");
+  jmethodID waitForIdle = env->GetMethodID(idlerClass.get(),
+      "waitForIdle", "()V");
+  jmethodID runnableInit = env->GetMethodID(emptyRunnableClass.get(),
+      "<init>", "()V");
 
-  jmethodID waitForIdleSync = env->GetMethodID(instrumentationClass, "waitForIdleSync", "()V");
+  ScopedLocalRef<jobject> mainLooper(env, env->CallStaticObjectMethod(looperClass.get(), getMainLooper));
+  ScopedLocalRef<jobject> mainQueue(env, env->CallObjectMethod(mainLooper.get(), getQueue));
+  ScopedLocalRef<jobject> mainHandler(env, env->NewObject(handlerClass.get(), handlerInit, mainLooper.get()));
 
+  int idx = 0;
   while (1) {
-    the_trace->msg_taken_ = false;
-    env->CallVoidMethod(instrumentation, waitForIdleSync);
-    LOG(INFO) << "MiniTraceIdleChecker: Idle!";
+    // Idler idler = new Idler(null);
+    // mainQueue.addIdleHandler(idler);
+    // mainHandler.post(new EmptyRunnable())
+    // idler.waitForIdle();
+    ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
+    ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
+    env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
+    env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
+    env->CallVoidMethod(idler.get(), waitForIdle);
 
-    while (!the_trace->msg_taken_) {
-      usleep(100000); // 0.1 second
+    LOG(INFO) << "MiniTrace: IdleChecker with idx " << idx++;
+    the_trace->msg_taken_ = false;
+    while (the_trace->msg_taken_ == false) {
+      usleep(500000);
     }
-    at = env->CallStaticObjectMethod(activityThreadClass, currentActivityThread);
-    instrumentation = env->CallObjectMethod(at, getInstrumentation);
   }
 
   runtime->DetachCurrentThread();
@@ -516,7 +543,7 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
       traced_thread_lock_(new Mutex("MiniTrace thread lock")),
       main_looper_(NULL),
       method_message_next_(NULL), main_message_(NULL),
-      idlechecker_thread_(0), msg_taken_(false), instrumentation_taken_(false) {
+      idlechecker_thread_(0), msg_taken_(false) {
 
   // Set prefix
   strcpy(prefix_, prefix);
@@ -594,14 +621,7 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
     }
   } else if (UNLIKELY(method_message_next_ == method && main_message_ == this_object)) {
     msg_taken_ = true;
-    // LOG(INFO) << "MiniTrace: MessageQueue.next()";
-  }
-
-  if (UNLIKELY(instrumentation_taken_ == false)) {
-    std::string name = method->GetName();
-    if (name.compare("getInstrumentation") == 0) {
-      instrumentation_taken_ = true;
-    }
+    LOG(INFO) << "MiniTrace: MessageQueue.next()";
   }
 }
 

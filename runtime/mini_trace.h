@@ -312,7 +312,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   mirror::Object *main_message_;
   pthread_t idlechecker_thread_;
   volatile bool msg_taken_;
-  volatile bool instrumentation_taken_;
 
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
 };
