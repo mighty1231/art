@@ -46,6 +46,27 @@
 
 namespace art {
 
+/**
+ * Method event - length 6
+ *   int16_t tid;
+ *   int32_t art_method_with_action
+ *
+ * Field event - length 14
+ *   int16_t tid;
+ *   int32_t art_field_with_action;
+ *   int32_t this_obj;
+ *   int32_t dex_pc;
+ *
+ * Exception event - variable length
+ *   int16_t tid;
+ *   int32_t dump_length_with_action;
+ *   char dumped[];
+ *
+ * Custom event - length 10
+ *   int16_t tid;
+ *   int32_t message_type_with_action;
+ *   int32_t message_content;
+ */
 enum MiniTraceAction {
     kMiniTraceMethodEnter = 0x00,       // method entry
     kMiniTraceMethodExit = 0x01,        // method exit
@@ -53,14 +74,8 @@ enum MiniTraceAction {
     kMiniTraceFieldRead = 0x03,         // field read
     kMiniTraceFieldWrite = 0x04,        // field write
     kMiniTraceExceptionCaught = 0x05,   // exception caught
-    kMiniTraceCustomMessage = 0x06,     // special events
+    kMiniTraceCustomEvent = 0x06,       // custom event
     kMiniTraceActionMask = 0x07,        // three bits
-};
-
-enum MiniTraceEventLength {
-  kMiniTraceMethodEventLength = 6,
-  kMiniTraceFieldEventLength = 14,
-  kMiniTraceLargestEventLength = kMiniTraceFieldEventLength,
 };
 
 MiniTrace* volatile MiniTrace::the_trace_ = NULL;
