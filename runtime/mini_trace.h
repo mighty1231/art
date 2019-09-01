@@ -222,7 +222,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   void LogNewThread(Thread *thread);
 
   void ReadBuffer(char *dest, size_t offset, size_t len);
-  void WriteBuffer(const char *src, size_t offset, size_t len);
+  void WriteRingBuffer(ringbuf_worker_t *worker, const char *src, size_t len);
 
   // Singleton instance of the Trace or NULL when no method tracing is active.
   static MiniTrace* volatile the_trace_ GUARDED_BY(Locks::trace_lock_);

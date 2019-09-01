@@ -53,6 +53,7 @@ enum MiniTraceAction {
     kMiniTraceFieldRead = 0x03,         // field read
     kMiniTraceFieldWrite = 0x04,        // field write
     kMiniTraceExceptionCaught = 0x05,   // exception caught
+    kMiniTraceCustomMessage = 0x06,     // special events
     kMiniTraceActionMask = 0x07,        // three bits
 };
 
@@ -181,7 +182,6 @@ static int CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid, uint32_t *log_
 
 void MiniTrace::ReadBuffer(char *dest, size_t offset, size_t len) {
   // Must be called after ringbuf_consume
-  Locks::mutator_lock_->AssertExclusiveHeld(Thread::Current());
   if (offset + len <= buffer_size_) {
     memcpy(dest, buf_ + offset, len);
   } else {
@@ -192,9 +192,9 @@ void MiniTrace::ReadBuffer(char *dest, size_t offset, size_t len) {
   }
 }
 
-void MiniTrace::WriteBuffer(const char *src, size_t offset, size_t len) {
-  // Must be called after ringbuf_acquire
-  Locks::mutator_lock_->AssertExclusiveHeld(Thread::Current());
+void MiniTrace::WriteRingBuffer(ringbuf_worker_t *worker, const char *src, size_t len) {
+  ssize_t offset;
+  while ((offset = ringbuf_acquire(ringbuf_, worker, len)) == -1) {}
   if (offset + len <= buffer_size_) {
     memcpy(buf_ + offset, src, len);
   } else {
@@ -203,6 +203,7 @@ void MiniTrace::WriteBuffer(const char *src, size_t offset, size_t len) {
     memcpy(buf_ + offset, src, first_size);
     memcpy(buf_, src + first_size, len - first_size);
   }
+  ringbuf_produce(ringbuf_, worker);
 }
 
 void MiniTrace::Start() {
@@ -641,16 +642,12 @@ void MiniTrace::ExceptionCaught(Thread* thread, const ThrowLocation& throw_locat
   std::string content = exception_object->Dump();
   uint16_t record_size = content.length() + 2 + 4 + 1;
   char *buf = new char[record_size]();
-  ssize_t off;
 
   Append2LE(buf, thread->GetTid());
   Append4LE(buf + 2, (record_size << 3) | action);
   strcpy(buf + 6, content.c_str());
 
-  while ((off = ringbuf_acquire(ringbuf_, ringbuf_worker, record_size)) == -1) {}
-  WriteBuffer(buf, off, record_size);
-  ringbuf_produce(ringbuf_, ringbuf_worker);
-
+  WriteRingBuffer(ringbuf_worker, buf, record_size);
   delete buf;
 }
 
@@ -677,15 +674,12 @@ void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, u
   LogNewMethod(method);
 
   char buf[6];
-  ssize_t off;
   uint32_t method_ptr = PointerToLowMemUInt32(method);
   DCHECK(~(method_ptr & kMiniTraceActionMask));
   Append2LE(buf, thread->GetTid());
   Append4LE(buf + 2, method_ptr | action);
 
-  while ((off = ringbuf_acquire(ringbuf_, ringbuf_worker, 6)) == -1) {}
-  WriteBuffer(buf, off, 6);
-  ringbuf_produce(ringbuf_, ringbuf_worker);
+  WriteRingBuffer(ringbuf_worker, buf, 6);
 }
 
 void MiniTrace::LogFieldTraceEvent(Thread* thread, mirror::Object *this_object, mirror::ArtField* field,
@@ -708,15 +702,12 @@ void MiniTrace::LogFieldTraceEvent(Thread* thread, mirror::Object *this_object, 
   LogNewField(field);
 
   char buf[14];
-  ssize_t off;
   Append2LE(buf, thread->GetTid());
   Append4LE(buf + 2, PointerToLowMemUInt32(field) | action);
   Append4LE(buf + 6, PointerToLowMemUInt32(this_object));
   Append4LE(buf + 10, dex_pc);
 
-  while ((off = ringbuf_acquire(ringbuf_, ringbuf_worker, 14)) == -1) {}
-  WriteBuffer(buf, off, 14);
-  ringbuf_produce(ringbuf_, ringbuf_worker);
+  WriteRingBuffer(ringbuf_worker, buf, 14);
 }
 
 void MiniTrace::StoreExitingThreadInfo(Thread* thread) {
