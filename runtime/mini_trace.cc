@@ -64,8 +64,8 @@ namespace art {
  *
  * Custom event - length 10
  *   int16_t tid;
- *   int32_t message_type_with_action;
- *   int32_t message_content;
+ *   int32_t content_length_with_action;
+ *   char message_content[];
  */
 enum MiniTraceAction {
     kMiniTraceMethodEnter = 0x00,       // method entry
@@ -248,9 +248,6 @@ void MiniTrace::Start() {
   CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
                                       the_trace),
                                       "Consumer thread");
-  CHECK_PTHREAD_CALL(pthread_create, (&the_trace->idlechecker_thread_, NULL, &IdleChecker,
-                                      the_trace),
-                                      "IdleChecker thread");
   runtime->GetInstrumentation()->AddListener(the_trace, log_flag & kInstListener);
   runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
@@ -474,78 +471,6 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   return NULL;
 }
 
-void *MiniTrace::IdleChecker(void *arg) {
-  MiniTrace *the_trace = (MiniTrace *)arg;
-  Runtime* runtime = Runtime::Current();
-  CHECK(runtime->AttachCurrentThread("IdleChecker", true, runtime->GetSystemThreadGroup(),
-                                       !runtime->IsCompiler()));
-
-  Thread *self = Thread::Current();
-  JNIEnvExt *env = self->GetJniEnv();
-  LOG(INFO) << "MiniTrace IdleChecker tid " << self->GetTid();
-  // the_trace->consumer_tid_ = self->GetTid();
-
-  // wait for first message taken, in order to wait initialization of various objects 
-  while (the_trace->msg_taken_ == false) {
-    usleep(500000); // 0.5 second
-  }
-  LOG(INFO) << "MiniTraceIdleChecker: First message taken";
-
-  // Wait for idle state of MainLooper
-  // Technique from Instrumentation$waitForIdleSync
-  // mainLooper = Looper.getMainLooper();
-  // mainQueue = mainlooper.getQueue();
-  // mainHandler = new Handler(mainLooper);
-  ScopedLocalRef<jclass> looperClass(env, env->FindClass("android/os/Looper"));
-  ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
-  ScopedLocalRef<jclass> handlerClass(env, env->FindClass("android/os/Handler"));
-  ScopedLocalRef<jclass> idlerClass(env, env->FindClass("android/app/Instrumentation$Idler"));
-  ScopedLocalRef<jclass> emptyRunnableClass(env, env->FindClass("android/app/Instrumentation$EmptyRunnable"));
-
-  jmethodID getMainLooper = env->GetStaticMethodID(looperClass.get(),
-      "getMainLooper", "()Landroid/os/Looper;");
-  jmethodID getQueue = env->GetMethodID(looperClass.get(),
-      "getQueue", "()Landroid/os/MessageQueue;");
-  jmethodID addIdleHandler = env->GetMethodID(queueClass.get(),
-      "addIdleHandler", "(Landroid/os/MessageQueue$IdleHandler;)V");
-  jmethodID handlerInit = env->GetMethodID(handlerClass.get(),
-      "<init>", "(Landroid/os/Looper;)V");
-  jmethodID post = env->GetMethodID(handlerClass.get(),
-      "post", "(Ljava/lang/Runnable;)Z");
-  jmethodID idlerInit = env->GetMethodID(idlerClass.get(),
-      "<init>", "(Ljava/lang/Runnable;)V");
-  jmethodID waitForIdle = env->GetMethodID(idlerClass.get(),
-      "waitForIdle", "()V");
-  jmethodID runnableInit = env->GetMethodID(emptyRunnableClass.get(),
-      "<init>", "()V");
-
-  ScopedLocalRef<jobject> mainLooper(env, env->CallStaticObjectMethod(looperClass.get(), getMainLooper));
-  ScopedLocalRef<jobject> mainQueue(env, env->CallObjectMethod(mainLooper.get(), getQueue));
-  ScopedLocalRef<jobject> mainHandler(env, env->NewObject(handlerClass.get(), handlerInit, mainLooper.get()));
-
-  int idx = 0;
-  while (1) {
-    // Idler idler = new Idler(null);
-    // mainQueue.addIdleHandler(idler);
-    // mainHandler.post(new EmptyRunnable())
-    // idler.waitForIdle();
-    ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
-    ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
-    env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
-    env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
-    env->CallVoidMethod(idler.get(), waitForIdle);
-
-    LOG(INFO) << "MiniTrace: IdleChecker with idx " << idx++;
-    the_trace->msg_taken_ = false;
-    while (the_trace->msg_taken_ == false) {
-      usleep(500000);
-    }
-  }
-
-  runtime->DetachCurrentThread();
-  return NULL;
-}
-
 MiniTrace::MiniTrace(int socket_fd, const char *prefix,
         uint32_t log_flag, uint32_t buffer_size)
     : socket_fd_(socket_fd), data_bin_index_(0),
@@ -557,9 +482,7 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
       traced_method_lock_(new Mutex("MiniTrace method lock")),
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")),
-      main_looper_(NULL),
-      method_message_next_(NULL), main_message_(NULL),
-      idlechecker_thread_(0), msg_taken_(false) {
+      method_message_next_(NULL), main_message_(NULL) {
 
   // Set prefix
   strcpy(prefix_, prefix);
@@ -606,25 +529,6 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
                          const JValue& return_value) {
   LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodExited);
 
-  if (UNLIKELY(main_looper_ == NULL)) {
-    std::string name = method->GetName();
-    if (name.compare("myLooper") == 0) {
-
-      main_looper_ = &return_value;
-
-      ScopedLocalRef<jclass> logprinterClass(env_, env_->FindClass("android/util/LogPrinter"));
-      ScopedLocalRef<jclass> looperClass(env_, env_->FindClass("android/os/Looper"));
-
-      jmethodID lpCtor = env_->GetMethodID(logprinterClass.get(), "<init>", "(ILjava/lang/String;)V");
-      ScopedLocalRef<jstring> tag(env_, env_->NewStringUTF("MainLooper"));
-      ScopedLocalRef<jobject> logPrinter(env_, env_->NewObject(logprinterClass.get(), lpCtor, 3, tag.get())); // Log.DEBUG is 3
-
-      jmethodID setMessageLoggingFunc = env_->GetMethodID(looperClass.get(), "setMessageLogging", "(Landroid/util/Printer;)V");
-      jobject mainLooper = env_->NewLocalRef(return_value.GetL());
-      env_->CallVoidMethod(mainLooper, setMessageLoggingFunc, logPrinter.get());
-      env_->DeleteLocalRef(mainLooper);
-    }
-  }
   // Assume the first called next() is called with MessageQueue from main thread
   if (UNLIKELY(method_message_next_ == NULL)) {
     if (strcmp(method->GetDeclaringClassDescriptor(), "Landroid/os/MessageQueue;") == 0) {
@@ -632,12 +536,11 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
       if (name.compare("next") == 0) {
         method_message_next_ = method;
         main_message_ = this_object;
-        msg_taken_ = true;
+        LogMessage(thread, return_value);
       }
     }
   } else if (UNLIKELY(method_message_next_ == method && main_message_ == this_object)) {
-    msg_taken_ = true;
-    LOG(INFO) << "MiniTrace: MessageQueue.next()";
+    LogMessage(thread, return_value);
   }
 }
 
@@ -664,6 +567,35 @@ void MiniTrace::ExceptionCaught(Thread* thread, const ThrowLocation& throw_locat
 
   WriteRingBuffer(ringbuf_worker, buf, record_size);
   delete buf;
+}
+
+void MiniTrace::LogMessage(Thread* thread, const JValue& message) {
+  ringbuf_worker_t *ringbuf_worker = GetRingBufWorker();
+  if (ringbuf_worker == NULL)
+    return;
+  JNIEnvExt *env = thread->GetJniEnv();
+  MiniTraceThreadFlag orig_flag = thread->GetMiniTraceFlag();
+  thread->SetMiniTraceFlag(kMiniTraceExclude);
+
+  /* @TODO Use cache */
+  ScopedLocalRef<jobject> jmessage(env, env->NewLocalRef(message.GetL()));
+  ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
+  jmethodID toString = env->GetMethodID(queueClass.get(), "toString", "()Ljava/lang/String;");
+
+  ScopedLocalRef<jobject> message_string(env,
+      env->CallObjectMethod(jmessage.get(), toString));
+  const char* message_cstring = env->GetStringUTFChars((jstring) message_string.get(), 0);
+
+  int32_t length = strlen(message_cstring);
+  int32_t record_size = length + 2 + 4 + 1;
+  char *buf = new char[record_size]();
+  Append2LE(buf, thread->GetTid());
+  Append4LE(buf + 2, (record_size << 3) | kMiniTraceCustomEvent);
+  strcpy(buf + 6, message_cstring);
+
+  env->ReleaseStringUTFChars((jstring) message_string.get(), message_cstring);
+  WriteRingBuffer(ringbuf_worker, buf, record_size);
+  thread->SetMiniTraceFlag(orig_flag);
 }
 
 void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
@@ -880,7 +812,7 @@ ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
   MiniTraceThreadFlag flag = self->GetMiniTraceFlag();
   if (flag == kMiniTraceFirstSeen) {
     pthread_t pself = pthread_self();
-    if (pself == consumer_thread_ || pself == idlechecker_thread_) {
+    if (pself == consumer_thread_) {
       self->SetMiniTraceFlag(kMiniTraceExclude);
       return NULL;
     }

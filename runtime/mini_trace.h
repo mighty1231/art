@@ -56,6 +56,7 @@ class Thread;
 class MiniTrace : public instrumentation::InstrumentationListener {
  public:
   enum MiniTraceFlag {
+    /* Flags used with instrumentation::Instrumentation */
     kDoMethodEntered =    0x00000001,
     kDoMethodExited =     0x00000002,
     kDoMethodUnwind =     0x00000004,
@@ -64,13 +65,18 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     kDoFieldWritten =     0x00000020,
     kDoExceptionCaught =  0x00000040,
     kInstListener =       0x00000077, /* Currently, DexPcMoved is not used */
-    /* Above flags are used on instrumentation::Instrumentation */
 
-    /* Following flags are used for MiniTrace */
+    /* Flags used only for MiniTrace */
     kDoCoverage =         0x00000080,
     kDoFilter =           0x00000100,
     kFlagAll =            0x000001FF
   };
+
+  enum CustomEventType {
+    // Last 3 bits should be zero
+    kMainMessageQueueNextExited = 0x00000010,
+  };
+
   static void Start()
       LOCKS_EXCLUDED(Locks::mutator_lock_,
                      Locks::thread_list_lock_,
@@ -122,7 +128,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   static void StoreExitingThreadInfo(Thread* thread);
 
   static void *ConsumerFunction(void *mt_object) LOCKS_EXCLUDED(Locks::trace_lock_);
-  static void *IdleChecker(void *mt_object);
 
   class ArtMethodDetail {
   public:
@@ -213,11 +218,13 @@ class MiniTrace : public instrumentation::InstrumentationListener {
                            bool enter_event)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  void DumpMethod(std::string &buffer); // SHARED_LOCKS_REQUIRED(this->traced_method_lock_)
-  void DumpField(std::string &buffer); // SHARED_LOCKS_REQUIRED(this->traced_field_lock_)
-  void DumpThread(std::string &buffer); // SHARED_LOCKS_REQUIRED(this->traced_thread_lock_)
+  void LogMessage(Thread* thread, const JValue& msg) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  void LogNewMethod(mirror::ArtMethod *method) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void DumpMethod(std::string &buffer);
+  void DumpField(std::string &buffer);
+  void DumpThread(std::string &buffer);
+
+  void LogNewMethod(mirror::ArtMethod *method);
   void LogNewField(mirror::ArtField *field);
   void LogNewThread(Thread *thread);
 
@@ -305,13 +312,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   Mutex *traced_thread_lock_;
 
   JNIEnvExt *env_;
-  const JValue *main_looper_;
-
-  // idle checking loop
   mirror::ArtMethod *method_message_next_;
   mirror::Object *main_message_;
-  pthread_t idlechecker_thread_;
-  volatile bool msg_taken_;
 
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
 };
