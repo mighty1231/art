@@ -241,6 +241,8 @@ void MiniTrace::Start() {
       return;
     LOG(INFO) << "MiniTrace: connection success, received prefix="
         << prefix << " log_flag=" << log_flag;
+    LOG(INFO) << "MiniTrace: However, flag should be fixed to 3 with this version";
+    log_flag = 3;
     the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, 1024 * 1024);
   }
   Runtime* runtime = Runtime::Current();
@@ -395,6 +397,12 @@ void *MiniTrace::ConsumerFunction(void *arg) {
           Locks::mutator_lock_->ExclusiveUnlock(self);
         }
       }
+
+      // If size exceeds 1GB, release it
+      // Same as checkout - @TODO differentiate those
+      int64_t size = trace_data_file_->GetLength();
+      if (size >= 1024 * 1024 * 1024)
+        the_trace->data_bin_index_++;
     }
 
     // Dump Method
@@ -527,7 +535,7 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
 void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
                          mirror::ArtMethod* method, uint32_t dex_pc,
                          const JValue& return_value) {
-  LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodExited);
+  // LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodExited);
 
   // Assume the first called next() is called with MessageQueue from main thread
   if (UNLIKELY(method_message_next_ == NULL)) {
