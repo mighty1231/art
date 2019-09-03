@@ -581,15 +581,23 @@ void MiniTrace::LogMessage(Thread* thread, const JValue& message) {
   ringbuf_worker_t *ringbuf_worker = GetRingBufWorker();
   if (ringbuf_worker == NULL)
     return;
-  JNIEnvExt *env = thread->GetJniEnv();
+
+  static Thread *_thread = NULL;
+  static JNIEnvExt *env = NULL;
+  static jclass queueClass;
+  static jmethodID toString;
+  if (_thread == NULL) {
+    // initialize
+    _thread = thread;
+    env = thread->GetJniEnv();
+    queueClass = jclass(env->NewGlobalRef(env->FindClass("android/os/MessageQueue")));
+    toString = env->GetMethodID(queueClass, "toString", "()Ljava/lang/String;");
+  } else CHECK(_thread == thread);
+
   MiniTraceThreadFlag orig_flag = thread->GetMiniTraceFlag();
   thread->SetMiniTraceFlag(kMiniTraceExclude);
 
-  /* @TODO Use cache */
   ScopedLocalRef<jobject> jmessage(env, env->NewLocalRef(message.GetL()));
-  ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
-  jmethodID toString = env->GetMethodID(queueClass.get(), "toString", "()Ljava/lang/String;");
-
   ScopedLocalRef<jobject> message_string(env,
       env->CallObjectMethod(jmessage.get(), toString));
   const char* message_cstring = env->GetStringUTFChars((jstring) message_string.get(), 0);
