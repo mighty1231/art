@@ -68,9 +68,20 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
     /* Flags used only for MiniTrace */
     kDoCoverage =         0x00000080,
-    kDoFilter =           0x00000100,
-    kLogMessage =         0x00000200,
-    kFlagAll =            0x000003FF
+    kLogMessage =         0x00000100,
+    kFilterField =        0x00000200,
+
+    /**
+     * Options for Filtering Methods
+     *  0. Do not filter, log for all methods (0)
+     *  1. Filter out basic methods (all from API) (0x1000)
+     *  2. Filter out APP-specific (non-API) methods (0x2000)
+     Note: Flag with 0x3000 should make crash
+     */
+    kFilterMethodFlags =  0x00003000,
+    kFilterBasicMethod =  0x00001000,
+    kFilterAPIMethod =    0x00002000,
+    kFlagAll =            0x000033FF
   };
 
   enum CustomEventType {

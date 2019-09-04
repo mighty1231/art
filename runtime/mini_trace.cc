@@ -795,8 +795,6 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass) {
       && (strncmp(descriptor, "Lcom/apple/", 11) != 0)
       && (strncmp(descriptor, "Landroid/", 9) != 0)
       && (strncmp(descriptor, "Lcom/android/", 13) != 0)) {
-    klass->SetIsMiniTraceable();
-
     {
       size_t num_fields = klass->NumInstanceFields();
       mirror::ObjectArray<mirror::ArtField>* fields = klass->GetIFields();
@@ -817,8 +815,6 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass) {
       }
     }
   }
-
-
 
   // Method filter
   if ((strncmp(descriptor, "Ljava/", 6) != 0)
