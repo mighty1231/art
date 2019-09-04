@@ -616,6 +616,11 @@ void MiniTrace::LogMessage(Thread* thread, const JValue& message) {
 
 void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
                                 instrumentation::Instrumentation::InstrumentationEvent event) {
+
+  if (!method->IsMiniTraceable()) {
+    return;
+  }
+
   MiniTraceAction action = kMiniTraceMethodEnter;
   switch (event) {
     case instrumentation::Instrumentation::kMethodEntered:
@@ -775,47 +780,60 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass) {
 
   std::string temp;
   const char* descriptor = klass->GetDescriptor(&temp);
-  if ((strncmp(descriptor, "Ljava/", 6) == 0)
-      || (strncmp(descriptor, "Ljavax/", 7) == 0)
-      || (strncmp(descriptor, "Lsun/", 5) == 0)
-      || (strncmp(descriptor, "Lcom/sun/", 9) == 0)
-      || (strncmp(descriptor, "Lcom/ibm/", 9) == 0)
-      || (strncmp(descriptor, "Lorg/xml/", 9) == 0)
-      || (strncmp(descriptor, "Lorg/w3c/", 9) == 0)
-      || (strncmp(descriptor, "Lapple/awt/", 11) == 0)
-      || (strncmp(descriptor, "Lcom/apple/", 11) == 0)
-      || (strncmp(descriptor, "Landroid/", 9) == 0)
-      || (strncmp(descriptor, "Lcom/android/", 13) == 0)) {
-    return;
-  }
 
-  klass->SetIsMiniTraceable();
+  if ((strncmp(descriptor, "Ljava/", 6) != 0)
+      && (strncmp(descriptor, "Ljavax/", 7) != 0)
+      && (strncmp(descriptor, "Lsun/", 5) != 0)
+      && (strncmp(descriptor, "Lcom/sun/", 9) != 0)
+      && (strncmp(descriptor, "Lcom/ibm/", 9) != 0)
+      && (strncmp(descriptor, "Lorg/xml/", 9) != 0)
+      && (strncmp(descriptor, "Lorg/w3c/", 9) != 0)
+      && (strncmp(descriptor, "Lapple/awt/", 11) != 0)
+      && (strncmp(descriptor, "Lcom/apple/", 11) != 0)
+      && (strncmp(descriptor, "Landroid/", 9) != 0)
+      && (strncmp(descriptor, "Lcom/android/", 13) != 0)) {
+    klass->SetIsMiniTraceable();
 
-  for (size_t i = 0, e = klass->NumDirectMethods(); i < e; i++) {
-    klass->GetDirectMethod(i)->SetIsMiniTraceable();
-  }
-  for (size_t i = 0, e = klass->NumVirtualMethods(); i < e; i++) {
-    klass->GetVirtualMethod(i)->SetIsMiniTraceable();
-  }
+    {
+      size_t num_fields = klass->NumInstanceFields();
+      mirror::ObjectArray<mirror::ArtField>* fields = klass->GetIFields();
 
-  {
-    size_t num_fields = klass->NumInstanceFields();
-    mirror::ObjectArray<mirror::ArtField>* fields = klass->GetIFields();
+      for (size_t i = 0; i < num_fields; i++) {
+        mirror::ArtField* f = fields->Get(i);
+        f->SetIsMiniTraceable();
+      }
+    }
 
-    for (size_t i = 0; i < num_fields; i++) {
-      mirror::ArtField* f = fields->Get(i);
-      f->SetIsMiniTraceable();
+    {
+      size_t num_fields = klass->NumStaticFields();
+      mirror::ObjectArray<mirror::ArtField>* fields = klass->GetSFields();
+
+      for (size_t i = 0; i < num_fields; i++) {
+        mirror::ArtField* f = fields->Get(i);
+        f->SetIsMiniTraceable();
+      }
     }
   }
 
-  {
-    size_t num_fields = klass->NumStaticFields();
-    mirror::ObjectArray<mirror::ArtField>* fields = klass->GetSFields();
 
-    for (size_t i = 0; i < num_fields; i++) {
-      mirror::ArtField* f = fields->Get(i);
-      f->SetIsMiniTraceable();
+
+  // Method filter
+  if ((strncmp(descriptor, "Ljava/", 6) != 0)
+    && (strncmp(descriptor, "Llibcore/", 9) != 0)
+    && (strncmp(descriptor, "Landroid/system/", 16) != 0)
+    && (strncmp(descriptor, "Landroid/os/StrictMode", 22) != 0)
+    && (strncmp(descriptor, "Ldalvik/system/", 15) != 0)
+    && (strncmp(descriptor, "Lcom/android/dex/", 17) != 0)
+    && (strncmp(descriptor, "Lcom/android/internal/util/", 27) != 0)
+    && (strncmp(descriptor, "Lorg/apache/harmony/", 20) != 0)) {
+
+    for (size_t i = 0, e = klass->NumDirectMethods(); i < e; i++) {
+      klass->GetDirectMethod(i)->SetIsMiniTraceable();
     }
+    for (size_t i = 0, e = klass->NumVirtualMethods(); i < e; i++) {
+      klass->GetVirtualMethod(i)->SetIsMiniTraceable();
+    }
+
   }
 }
 
