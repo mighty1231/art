@@ -69,7 +69,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     /* Flags used only for MiniTrace */
     kDoCoverage =         0x00000080,
     kDoFilter =           0x00000100,
-    kFlagAll =            0x000001FF
+    kLogMessage =         0x00000200,
+    kFlagAll =            0x000003FF
   };
 
   enum CustomEventType {

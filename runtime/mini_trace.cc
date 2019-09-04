@@ -241,8 +241,6 @@ void MiniTrace::Start() {
       return;
     LOG(INFO) << "MiniTrace: connection success, received prefix="
         << prefix << " log_flag=" << log_flag;
-    LOG(INFO) << "MiniTrace: However, flag should be fixed to 3 with this version";
-    log_flag = 3;
     the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, 1024 * 1024);
   }
   Runtime* runtime = Runtime::Current();
@@ -250,6 +248,8 @@ void MiniTrace::Start() {
   CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
                                       the_trace),
                                       "Consumer thread");
+  if (log_flag & kLogMessage)
+    log_flag |= kDoMethodExited;
   runtime->GetInstrumentation()->AddListener(the_trace, log_flag & kInstListener);
   runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
@@ -535,20 +535,23 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
 void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
                          mirror::ArtMethod* method, uint32_t dex_pc,
                          const JValue& return_value) {
-  // LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodExited);
+  if (log_flag_ & kDoMethodExited)
+    LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodExited);
 
-  // Assume the first called next() is called with MessageQueue from main thread
-  if (UNLIKELY(method_message_next_ == NULL)) {
-    if (strcmp(method->GetDeclaringClassDescriptor(), "Landroid/os/MessageQueue;") == 0) {
-      std::string name = method->GetName();
-      if (name.compare("next") == 0) {
-        method_message_next_ = method;
-        main_message_ = this_object;
-        LogMessage(thread, return_value);
+  if (log_flag_ & kLogMessage) {
+    // Assume the first called next() is called with MessageQueue from main thread
+    if (UNLIKELY(method_message_next_ == NULL)) {
+      if (strcmp(method->GetDeclaringClassDescriptor(), "Landroid/os/MessageQueue;") == 0) {
+        std::string name = method->GetName();
+        if (name.compare("next") == 0) {
+          method_message_next_ = method;
+          main_message_ = this_object;
+          LogMessage(thread, return_value);
+        }
       }
+    } else if (UNLIKELY(method_message_next_ == method && main_message_ == this_object)) {
+      LogMessage(thread, return_value);
     }
-  } else if (UNLIKELY(method_message_next_ == method && main_message_ == this_object)) {
-    LogMessage(thread, return_value);
   }
 }
 
