@@ -77,8 +77,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     kLogFieldType2       = 0x04000000, // UNUSED
     kLogFieldType3       = 0x08000000, // fields defined on app
     kLogMethodTypeFlags  = 0xF0000000,
-    kLogMethodType0      = 0x10000000, // Non-basic API methods
-    kLogMethodType1      = 0x20000000, // Basic API methods
+    kLogMethodType0      = 0x10000000, // Basic API methods
+    kLogMethodType1      = 0x20000000, // Non-basic API methods
     kLogMethodType2      = 0x40000000, // UNUSED
     kLogMethodType3      = 0x80000000, // methods defined on app
     kFlagAll             = 0xFF0001FF
