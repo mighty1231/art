@@ -247,6 +247,11 @@ void MiniTrace::Start() {
       || (log_flag & kLogMethodTypeFlags));
     CHECK(!(log_flag & (kDoFieldRead | kDoFieldWritten))
       || (log_flag & kLogFieldTypeFlags));
+
+    // Currently UNUSED flags
+    CHECK(!(log_flag & kLogFieldType1));
+    CHECK(!(log_flag & kLogFieldType2));
+    CHECK(!(log_flag & kLogMethodType2));
     the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, 1024 * 1024);
   }
   Runtime* runtime = Runtime::Current();
@@ -790,62 +795,68 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass) {
     return;
   }
 
+  static const DexFile *apkDexFile = NULL;
+  const DexFile& dxFile = klass->GetDexFile();
+  if (apkDexFile == NULL && (dxFile.GetLocation().rfind("/data/app/", 0) == 0))
+    apkDexFile = &dxFile;
   std::string temp;
   const char* descriptor = klass->GetDescriptor(&temp);
 
-  if ((strncmp(descriptor, "Ljava/", 6) == 0)
-      || (strncmp(descriptor, "Ljavax/", 7) == 0)
-      || (strncmp(descriptor, "Lsun/", 5) == 0)
-      || (strncmp(descriptor, "Lcom/sun/", 9) == 0)
-      || (strncmp(descriptor, "Lcom/ibm/", 9) == 0)
-      || (strncmp(descriptor, "Lorg/xml/", 9) == 0)
-      || (strncmp(descriptor, "Lorg/w3c/", 9) == 0)
-      || (strncmp(descriptor, "Lapple/awt/", 11) == 0)
-      || (strncmp(descriptor, "Lcom/apple/", 11) == 0)
-      || (strncmp(descriptor, "Landroid/", 9) == 0)
-      || (strncmp(descriptor, "Lcom/android/", 13) == 0)) {
+  // (strncmp(descriptor, "Ljava/", 6) == 0)
+  //  || (strncmp(descriptor, "Ljavax/", 7) == 0)
+  //  || (strncmp(descriptor, "Lsun/", 5) == 0)
+  //  || (strncmp(descriptor, "Lcom/sun/", 9) == 0)
+  //  || (strncmp(descriptor, "Lcom/ibm/", 9) == 0)
+  //  || (strncmp(descriptor, "Lorg/xml/", 9) == 0)
+  //  || (strncmp(descriptor, "Lorg/w3c/", 9) == 0)
+  //  || (strncmp(descriptor, "Lapple/awt/", 11) == 0)
+  //  || (strncmp(descriptor, "Lcom/apple/", 11) == 0)
+  //  || (strncmp(descriptor, "Landroid/", 9) == 0)
+  //  || (strncmp(descriptor, "Lcom/android/", 13) == 0)
+
+  if (&dxFile == apkDexFile) {
+    // App-specific fields
     {
-      size_t num_fields = klass->NumInstanceFields();
       mirror::ObjectArray<mirror::ArtField>* fields = klass->GetIFields();
-
-      for (size_t i = 0; i < num_fields; i++) {
+      for (int32_t i = 0; i < fields->GetLength(); i++) {
         mirror::ArtField* f = fields->Get(i);
-        f->SetMiniTraceType(1);
+        f->SetMiniTraceType(3);
       }
     }
-
     {
-      size_t num_fields = klass->NumStaticFields();
       mirror::ObjectArray<mirror::ArtField>* fields = klass->GetSFields();
-
-      for (size_t i = 0; i < num_fields; i++) {
+      for (int32_t i = 0; i < fields->GetLength(); i++) {
         mirror::ArtField* f = fields->Get(i);
-        f->SetMiniTraceType(1);
+        f->SetMiniTraceType(3);
       }
     }
-  }
 
-  if ((strncmp(descriptor, "Ljava/", 6) == 0)
-      || (strncmp(descriptor, "Llibcore/", 9) == 0)
-      || (strncmp(descriptor, "Landroid/system/", 16) == 0)
-      || (strncmp(descriptor, "Landroid/os/StrictMode", 22) == 0)
-      || (strncmp(descriptor, "Ldalvik/system/", 15) == 0)
-      || (strncmp(descriptor, "Lcom/android/dex/", 17) == 0)
-      || (strncmp(descriptor, "Lcom/android/internal/util/", 27) == 0)
-      || (strncmp(descriptor, "Lorg/apache/harmony/", 20) == 0)) {
+    // App-specific methods
     for (size_t i = 0, e = klass->NumDirectMethods(); i < e; i++) {
-      klass->GetDirectMethod(i)->SetMiniTraceType(2);
+      klass->GetDirectMethod(i)->SetMiniTraceType(3);
     }
     for (size_t i = 0, e = klass->NumVirtualMethods(); i < e; i++) {
-      klass->GetVirtualMethod(i)->SetMiniTraceType(2);
+      klass->GetVirtualMethod(i)->SetMiniTraceType(3);
     }
-  } else if (false /* @TODO all other API methods */) {
-    for (size_t i = 0, e = klass->NumDirectMethods(); i < e; i++) {
-      klass->GetDirectMethod(i)->SetMiniTraceType(1);
+  } else {
+    // API methods
+    if ((strncmp(descriptor, "Ljava/", 6) == 0)
+        || (strncmp(descriptor, "Llibcore/", 9) == 0)
+        || (strncmp(descriptor, "Landroid/system/", 16) == 0)
+        || (strncmp(descriptor, "Landroid/os/StrictMode", 22) == 0)
+        || (strncmp(descriptor, "Ldalvik/system/", 15) == 0)
+        || (strncmp(descriptor, "Lcom/android/dex/", 17) == 0)
+        || (strncmp(descriptor, "Lcom/android/internal/util/", 27) == 0)
+        || (strncmp(descriptor, "Lorg/apache/harmony/", 20) == 0)) {
+      // Basic methods among API methods
+      for (size_t i = 0, e = klass->NumDirectMethods(); i < e; i++) {
+        klass->GetDirectMethod(i)->SetMiniTraceType(1);
+      }
+      for (size_t i = 0, e = klass->NumVirtualMethods(); i < e; i++) {
+        klass->GetVirtualMethod(i)->SetMiniTraceType(1);
+      }
     }
-    for (size_t i = 0, e = klass->NumVirtualMethods(); i < e; i++) {
-      klass->GetVirtualMethod(i)->SetMiniTraceType(1);
-    }
+    // Non-basic API methods are type 0
   }
 }
 

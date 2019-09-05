@@ -70,23 +70,17 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     kDoCoverage          = 0x00000080,
     kLogMessage          = 0x00000100, // log all messages on main looper
 
-    /**
-     * Options for Filtering Methods / Fields
-     *  0. Do not filter, log for all methods (0)
-     *  1. Filter out basic methods (all from API) (0x1000)
-     *  2. Filter out APP-specific (non-API) methods (0x2000)
-     * Note: Flag with 0x3000 should make crash
-     */
+    /* Flags used for filtering objects */
     kLogFieldTypeFlags   = 0x0F000000,
-    kLogFieldType0       = 0x01000000,
-    kLogFieldType1       = 0x02000000,
-    kLogFieldType2       = 0x04000000,
-    kLogFieldType3       = 0x08000000,
+    kLogFieldType0       = 0x01000000, // All the other fields
+    kLogFieldType1       = 0x02000000, // UNUSED
+    kLogFieldType2       = 0x04000000, // UNUSED
+    kLogFieldType3       = 0x08000000, // fields defined on app
     kLogMethodTypeFlags  = 0xF0000000,
-    kLogMethodType0      = 0x10000000,
-    kLogMethodType1      = 0x20000000,
-    kLogMethodType2      = 0x40000000,
-    kLogMethodType3      = 0x80000000,
+    kLogMethodType0      = 0x10000000, // Non-basic API methods
+    kLogMethodType1      = 0x20000000, // Basic API methods
+    kLogMethodType2      = 0x40000000, // UNUSED
+    kLogMethodType3      = 0x80000000, // methods defined on app
     kFlagAll             = 0xFF0001FF
   };
 
@@ -172,7 +166,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         classDescriptor_.c_str(),
         name_.c_str(),
         signature_.c_str(),
-        declaringClassSourceFile_.c_str()));
+        declaringClassSourceFile_.c_str()
+      ));
     }
   private:
     mirror::ArtMethod* method_;
