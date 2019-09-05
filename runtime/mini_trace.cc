@@ -817,15 +817,20 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass) {
   if (&dxFile == apkDexFile) {
     // App-specific fields
     {
+      size_t num_fields = klass->NumInstanceFields();
       mirror::ObjectArray<mirror::ArtField>* fields = klass->GetIFields();
-      for (int32_t i = 0; i < fields->GetLength(); i++) {
+
+      for (size_t i = 0; i < num_fields; i++) {
         mirror::ArtField* f = fields->Get(i);
         f->SetMiniTraceType(3);
       }
     }
+
     {
+      size_t num_fields = klass->NumStaticFields();
       mirror::ObjectArray<mirror::ArtField>* fields = klass->GetSFields();
-      for (int32_t i = 0; i < fields->GetLength(); i++) {
+
+      for (size_t i = 0; i < num_fields; i++) {
         mirror::ArtField* f = fields->Get(i);
         f->SetMiniTraceType(3);
       }
