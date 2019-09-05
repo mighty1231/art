@@ -259,11 +259,92 @@ void MiniTrace::Start() {
   CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
                                       the_trace),
                                       "Consumer thread");
+  CHECK_PTHREAD_CALL(pthread_create, (&the_trace->idlechecker_thread_, NULL, &IdleChecker,
+                                      the_trace),
+                                      "IdleChecker thread");
   if (log_flag & kLogMessage)
     log_flag |= kDoMethodExited;
   runtime->GetInstrumentation()->AddListener(the_trace, log_flag & kInstListener);
   runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
+}
+
+void *MiniTrace::IdleChecker(void *arg) {
+  MiniTrace *the_trace = (MiniTrace *)arg;
+  Runtime* runtime = Runtime::Current();
+  CHECK(runtime->AttachCurrentThread("IdleChecker", true, runtime->GetSystemThreadGroup(),
+                                       !runtime->IsCompiler()));
+
+  Thread *self = Thread::Current();
+  JNIEnvExt *env = self->GetJniEnv();
+  LOG(INFO) << "MiniTrace IdleChecker tid " << self->GetTid();
+  // @TODO IPC with ape agent
+
+  // wait for first message taken, in order to wait initialization of various objects 
+  while (the_trace->msg_taken_ == false) {
+    usleep(500000); // 0.5 second
+  }
+  LOG(INFO) << "MiniTraceIdleChecker: First message taken";
+
+  /**
+   * Wait for idle state of MainLooper
+   * Technique borrowed from Instrumentation$waitForIdleSync
+   * Implemented following JAVA code
+   * $ mainLooper = Looper.getMainLooper();
+   * $ mainQueue = mainlooper.getQueue();
+   * $ mainHandler = new Handler(mainLooper);
+   */
+  ScopedLocalRef<jclass> looperClass(env, env->FindClass("android/os/Looper"));
+  ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
+  ScopedLocalRef<jclass> handlerClass(env, env->FindClass("android/os/Handler"));
+  ScopedLocalRef<jclass> idlerClass(env, env->FindClass("android/app/Instrumentation$Idler"));
+  ScopedLocalRef<jclass> emptyRunnableClass(env, env->FindClass("android/app/Instrumentation$EmptyRunnable"));
+
+  jmethodID getMainLooper = env->GetStaticMethodID(looperClass.get(),
+      "getMainLooper", "()Landroid/os/Looper;");
+  jmethodID getQueue = env->GetMethodID(looperClass.get(),
+      "getQueue", "()Landroid/os/MessageQueue;");
+  jmethodID addIdleHandler = env->GetMethodID(queueClass.get(),
+      "addIdleHandler", "(Landroid/os/MessageQueue$IdleHandler;)V");
+  jmethodID handlerInit = env->GetMethodID(handlerClass.get(),
+      "<init>", "(Landroid/os/Looper;)V");
+  jmethodID post = env->GetMethodID(handlerClass.get(),
+      "post", "(Ljava/lang/Runnable;)Z");
+  jmethodID idlerInit = env->GetMethodID(idlerClass.get(),
+      "<init>", "(Ljava/lang/Runnable;)V");
+  jmethodID waitForIdle = env->GetMethodID(idlerClass.get(),
+      "waitForIdle", "()V");
+  jmethodID runnableInit = env->GetMethodID(emptyRunnableClass.get(),
+      "<init>", "()V");
+
+  ScopedLocalRef<jobject> mainLooper(env, env->CallStaticObjectMethod(looperClass.get(), getMainLooper));
+  ScopedLocalRef<jobject> mainQueue(env, env->CallObjectMethod(mainLooper.get(), getQueue));
+  ScopedLocalRef<jobject> mainHandler(env, env->NewObject(handlerClass.get(), handlerInit, mainLooper.get()));
+
+  int idx = 0;
+  while (1) {
+    /**
+     * Implemented following JAVA code
+     * $ Idler idler = new Idler(null);
+     * $ mainQueue.addIdleHandler(idler);
+     * $ mainHandler.post(new EmptyRunnable());
+     * $ idler.waitForIdle();
+     */
+    ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
+    ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
+    env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
+    env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
+    env->CallVoidMethod(idler.get(), waitForIdle);
+
+    LOG(INFO) << "MiniTrace: IdleChecker with idx " << idx++;
+    the_trace->msg_taken_ = false;
+    while (the_trace->msg_taken_ == false) {
+      usleep(500000);
+    }
+  }
+
+  runtime->DetachCurrentThread();
+  return NULL;
 }
 
 void MiniTrace::Stop() {

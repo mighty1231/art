@@ -140,6 +140,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   static void StoreExitingThreadInfo(Thread* thread);
 
   static void *ConsumerFunction(void *mt_object) LOCKS_EXCLUDED(Locks::trace_lock_);
+  static void *IdleChecker(void *mt_object);
 
   class ArtMethodDetail {
   public:
@@ -324,6 +325,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   JNIEnvExt *env_;
   mirror::ArtMethod *method_message_next_;
   mirror::Object *main_message_;
+
+  pthread_t idlechecker_thread_;
 
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
 };
