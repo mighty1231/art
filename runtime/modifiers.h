@@ -52,8 +52,12 @@ static constexpr uint32_t kAccMiranda =              0x00200000;  // method (dex
 // Special runtime-only flags.
 // Note: if only kAccClassIsReference is set, we have a soft reference.
 
-// A class, method or field is mini-traceable
-static constexpr uint32_t kAccIsMiniTraceable           = 0x40000000;
+// classify methods or fields in MiniTrace
+static constexpr uint32_t kAccMiniTraceType1            = 0x10000000;
+static constexpr uint32_t kAccMiniTraceType2            = 0x20000000;
+static constexpr uint32_t kAccMiniTraceType3            = 0x30000000;
+static constexpr uint32_t kAccMiniTraceTypeFlag         = 0x30000000;
+static constexpr uint32_t kAccMiniTraceTypeShift        = 28;
 
 // class/ancestor overrides finalize()
 static constexpr uint32_t kAccClassIsFinalizable        = 0x80000000;

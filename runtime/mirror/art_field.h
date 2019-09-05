@@ -62,18 +62,21 @@ class MANAGED ArtField FINAL : public Object {
     SetField32<false>(OFFSET_OF_OBJECT_MEMBER(ArtField, access_flags_), new_access_flags);
   }
 
-  bool IsMiniTraceable() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    return (GetAccessFlags() & kAccIsMiniTraceable) != 0;
+  uint32_t GetMiniTraceType() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    switch (GetAccessFlags() & kAccMiniTraceTypeFlag) {
+      case kAccMiniTraceType1:
+        return 1;
+      case kAccMiniTraceType2:
+        return 2;
+      case kAccMiniTraceType3:
+        return 3;
+    }
+    return 0;
   }
 
-  void SetIsMiniTraceable() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    DCHECK(!IsMiniTraceable());
-    SetAccessFlags(GetAccessFlags() | kAccIsMiniTraceable);
-  }
-
-  void ClearIsMiniTraceable() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    DCHECK(IsMiniTraceable());
-    SetAccessFlags(GetAccessFlags() & ~kAccIsMiniTraceable);
+  void SetMiniTraceType(uint32_t level) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SetAccessFlags((GetAccessFlags() & ~kAccMiniTraceTypeFlag)
+        | ((level & 3) << kAccMiniTraceTypeShift));
   }
 
   bool IsPublic() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {

@@ -57,31 +57,37 @@ class MiniTrace : public instrumentation::InstrumentationListener {
  public:
   enum MiniTraceFlag {
     /* Flags used with instrumentation::Instrumentation */
-    kDoMethodEntered =    0x00000001,
-    kDoMethodExited =     0x00000002,
-    kDoMethodUnwind =     0x00000004,
-    kDoDexPcMoved =       0x00000008,
-    kDoFieldRead =        0x00000010,
-    kDoFieldWritten =     0x00000020,
-    kDoExceptionCaught =  0x00000040,
-    kInstListener =       0x00000077, /* Currently, DexPcMoved is not used */
+    kDoMethodEntered     = 0x00000001,
+    kDoMethodExited      = 0x00000002,
+    kDoMethodUnwind      = 0x00000004,
+    kDoDexPcMoved        = 0x00000008,
+    kDoFieldRead         = 0x00000010,
+    kDoFieldWritten      = 0x00000020,
+    kDoExceptionCaught   = 0x00000040,
+    kInstListener        = 0x00000077, /* Currently, DexPcMoved is not used */
 
     /* Flags used only for MiniTrace */
-    kDoCoverage =         0x00000080,
-    kLogMessage =         0x00000100,
-    kFilterField =        0x00000200,
+    kDoCoverage          = 0x00000080,
+    kLogMessage          = 0x00000100, // log all messages on main looper
 
     /**
-     * Options for Filtering Methods
+     * Options for Filtering Methods / Fields
      *  0. Do not filter, log for all methods (0)
      *  1. Filter out basic methods (all from API) (0x1000)
      *  2. Filter out APP-specific (non-API) methods (0x2000)
-     Note: Flag with 0x3000 should make crash
+     * Note: Flag with 0x3000 should make crash
      */
-    kFilterMethodFlags =  0x00003000,
-    kFilterBasicMethod =  0x00001000,
-    kFilterAPIMethod =    0x00002000,
-    kFlagAll =            0x000033FF
+    kLogFieldTypeFlags   = 0x0F000000,
+    kLogFieldType0       = 0x01000000,
+    kLogFieldType1       = 0x02000000,
+    kLogFieldType2       = 0x04000000,
+    kLogFieldType3       = 0x08000000,
+    kLogMethodTypeFlags  = 0xF0000000,
+    kLogMethodType0      = 0x10000000,
+    kLogMethodType1      = 0x20000000,
+    kLogMethodType2      = 0x40000000,
+    kLogMethodType3      = 0x80000000,
+    kFlagAll             = 0xFF0001FF
   };
 
   enum CustomEventType {
@@ -305,9 +311,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   // Log execution data
   bool do_coverage_;
-
-  // Filter library code
-  bool do_filter_;
 
   const uint32_t buffer_size_;
 

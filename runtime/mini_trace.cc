@@ -241,6 +241,12 @@ void MiniTrace::Start() {
       return;
     LOG(INFO) << "MiniTrace: connection success, received prefix="
         << prefix << " log_flag=" << log_flag;
+
+    CHECK((log_flag & ~kFlagAll) == 0);
+    CHECK(!(log_flag & (kDoMethodEntered | kDoMethodExited | kDoMethodUnwind))
+      || (log_flag & kLogMethodTypeFlags));
+    CHECK(!(log_flag & (kDoFieldRead | kDoFieldWritten))
+      || (log_flag & kLogFieldTypeFlags));
     the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, 1024 * 1024);
   }
   Runtime* runtime = Runtime::Current();
@@ -486,7 +492,7 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
       wids_registered_lock_(new Mutex("Ringbuf worker lock")),
       consumer_runs_(true), consumer_tid_(0),
       log_flag_(log_flag), do_coverage_((log_flag & kDoCoverage) != 0),
-      do_filter_((log_flag & kDoFilter) != 0), buffer_size_(buffer_size), start_time_(MicroTime()),
+      buffer_size_(buffer_size), start_time_(MicroTime()),
       traced_method_lock_(new Mutex("MiniTrace method lock")),
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")),
@@ -619,10 +625,12 @@ void MiniTrace::LogMessage(Thread* thread, const JValue& message) {
 
 void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
                                 instrumentation::Instrumentation::InstrumentationEvent event) {
-
-  if (!method->IsMiniTraceable()) {
+  uint32_t minitrace_type = method->GetMiniTraceType();
+  if ((minitrace_type == 0 && !(log_flag_ & kLogMethodType0))
+      || (minitrace_type == 1 && !(log_flag_ & kLogMethodType1))
+      || (minitrace_type == 2 && !(log_flag_ & kLogMethodType2))
+      || (minitrace_type == 3 && !(log_flag_ & kLogMethodType3)))
     return;
-  }
 
   MiniTraceAction action = kMiniTraceMethodEnter;
   switch (event) {
@@ -655,10 +663,12 @@ void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, u
 
 void MiniTrace::LogFieldTraceEvent(Thread* thread, mirror::Object *this_object, mirror::ArtField* field,
                                 uint32_t dex_pc, bool read_event) {
-
-  if (!field->IsMiniTraceable()) {
+  uint32_t minitrace_type = field->GetMiniTraceType();
+  if ((minitrace_type == 0 && !(log_flag_ & kLogFieldType0))
+      || (minitrace_type == 1 && !(log_flag_ & kLogFieldType1))
+      || (minitrace_type == 2 && !(log_flag_ & kLogFieldType2))
+      || (minitrace_type == 3 && !(log_flag_ & kLogFieldType3)))
     return;
-  }
 
   MiniTraceAction action;
   if (read_event) {
@@ -737,10 +747,6 @@ bool* MiniTrace::GetExecutionData(Thread* self, mirror::ArtMethod* method) {
     return NULL;
   }
 
-  if (!method->IsMiniTraceable()) {
-    return NULL;
-  }
-
   {
     DCHECK_EQ(self, Thread::Current());
     MutexLock mu(Thread::Current(), *Locks::trace_lock_);
@@ -753,9 +759,12 @@ bool* MiniTrace::GetExecutionData(Thread* self, mirror::ArtMethod* method) {
       return NULL;
     }
 
-    if (the_trace->do_filter_ && !method->IsMiniTraceable()) {
+    uint32_t minitrace_type = method->GetMiniTraceType();
+    if ((minitrace_type == 0 && !(the_trace->log_flag_ & kLogMethodType0))
+        || (minitrace_type == 1 && !(the_trace->log_flag_ & kLogMethodType1))
+        || (minitrace_type == 2 && !(the_trace->log_flag_ & kLogMethodType2))
+        || (minitrace_type == 3 && !(the_trace->log_flag_ & kLogMethodType3)))
       return NULL;
-    }
 
     SafeMap<mirror::ArtMethod*, bool*>::const_iterator it = the_trace->execution_data_.find(method);
     if (it == the_trace_->execution_data_.end()) {
@@ -784,24 +793,24 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass) {
   std::string temp;
   const char* descriptor = klass->GetDescriptor(&temp);
 
-  if ((strncmp(descriptor, "Ljava/", 6) != 0)
-      && (strncmp(descriptor, "Ljavax/", 7) != 0)
-      && (strncmp(descriptor, "Lsun/", 5) != 0)
-      && (strncmp(descriptor, "Lcom/sun/", 9) != 0)
-      && (strncmp(descriptor, "Lcom/ibm/", 9) != 0)
-      && (strncmp(descriptor, "Lorg/xml/", 9) != 0)
-      && (strncmp(descriptor, "Lorg/w3c/", 9) != 0)
-      && (strncmp(descriptor, "Lapple/awt/", 11) != 0)
-      && (strncmp(descriptor, "Lcom/apple/", 11) != 0)
-      && (strncmp(descriptor, "Landroid/", 9) != 0)
-      && (strncmp(descriptor, "Lcom/android/", 13) != 0)) {
+  if ((strncmp(descriptor, "Ljava/", 6) == 0)
+      || (strncmp(descriptor, "Ljavax/", 7) == 0)
+      || (strncmp(descriptor, "Lsun/", 5) == 0)
+      || (strncmp(descriptor, "Lcom/sun/", 9) == 0)
+      || (strncmp(descriptor, "Lcom/ibm/", 9) == 0)
+      || (strncmp(descriptor, "Lorg/xml/", 9) == 0)
+      || (strncmp(descriptor, "Lorg/w3c/", 9) == 0)
+      || (strncmp(descriptor, "Lapple/awt/", 11) == 0)
+      || (strncmp(descriptor, "Lcom/apple/", 11) == 0)
+      || (strncmp(descriptor, "Landroid/", 9) == 0)
+      || (strncmp(descriptor, "Lcom/android/", 13) == 0)) {
     {
       size_t num_fields = klass->NumInstanceFields();
       mirror::ObjectArray<mirror::ArtField>* fields = klass->GetIFields();
 
       for (size_t i = 0; i < num_fields; i++) {
         mirror::ArtField* f = fields->Get(i);
-        f->SetIsMiniTraceable();
+        f->SetMiniTraceType(1);
       }
     }
 
@@ -811,28 +820,32 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass) {
 
       for (size_t i = 0; i < num_fields; i++) {
         mirror::ArtField* f = fields->Get(i);
-        f->SetIsMiniTraceable();
+        f->SetMiniTraceType(1);
       }
     }
   }
 
-  // Method filter
-  if ((strncmp(descriptor, "Ljava/", 6) != 0)
-    && (strncmp(descriptor, "Llibcore/", 9) != 0)
-    && (strncmp(descriptor, "Landroid/system/", 16) != 0)
-    && (strncmp(descriptor, "Landroid/os/StrictMode", 22) != 0)
-    && (strncmp(descriptor, "Ldalvik/system/", 15) != 0)
-    && (strncmp(descriptor, "Lcom/android/dex/", 17) != 0)
-    && (strncmp(descriptor, "Lcom/android/internal/util/", 27) != 0)
-    && (strncmp(descriptor, "Lorg/apache/harmony/", 20) != 0)) {
-
+  if ((strncmp(descriptor, "Ljava/", 6) == 0)
+      || (strncmp(descriptor, "Llibcore/", 9) == 0)
+      || (strncmp(descriptor, "Landroid/system/", 16) == 0)
+      || (strncmp(descriptor, "Landroid/os/StrictMode", 22) == 0)
+      || (strncmp(descriptor, "Ldalvik/system/", 15) == 0)
+      || (strncmp(descriptor, "Lcom/android/dex/", 17) == 0)
+      || (strncmp(descriptor, "Lcom/android/internal/util/", 27) == 0)
+      || (strncmp(descriptor, "Lorg/apache/harmony/", 20) == 0)) {
     for (size_t i = 0, e = klass->NumDirectMethods(); i < e; i++) {
-      klass->GetDirectMethod(i)->SetIsMiniTraceable();
+      klass->GetDirectMethod(i)->SetMiniTraceType(2);
     }
     for (size_t i = 0, e = klass->NumVirtualMethods(); i < e; i++) {
-      klass->GetVirtualMethod(i)->SetIsMiniTraceable();
+      klass->GetVirtualMethod(i)->SetMiniTraceType(2);
     }
-
+  } else if (false /* @TODO all other API methods */) {
+    for (size_t i = 0, e = klass->NumDirectMethods(); i < e; i++) {
+      klass->GetDirectMethod(i)->SetMiniTraceType(1);
+    }
+    for (size_t i = 0, e = klass->NumVirtualMethods(); i < e; i++) {
+      klass->GetVirtualMethod(i)->SetMiniTraceType(1);
+    }
   }
 }
 
