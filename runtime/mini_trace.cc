@@ -195,6 +195,28 @@ static int CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid, uint32_t *log_
   return -1;
 }
 
+static int CreateSocketAndCheckAPE(void *buf, uid_t uid, uint32_t *log_flag) {
+  int socket_fd;
+  sockaddr_un server_addr;
+  if ((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
+    PLOG(ERROR) << "MiniTrace::IdleChecker: socket " << errno;
+    return -1;
+  }
+
+  memset(&server_addr, 0, sizeof server_addr);
+  server_addr.sun_family = AF_UNIX;
+  strcpy(&server_addr.sun_path[1], "/dev/mt/ape");
+  int addrlen = sizeof server_addr.sun_family + strlen(&server_addr.sun_path[1]) + 1;
+
+  if (connect(socket_fd, (sockaddr *)&server_addr, addrlen) < 0) {
+    PLOG(ERROR) << "MiniTrace::IdleChecker: connect " << errno;
+    close(socket_fd);
+    return -1;
+  }
+  LOG(INFO) << "MiniTrace::IdleChecker: connect success!";
+  return socket_fd;
+}
+
 void MiniTrace::ReadBuffer(char *dest, size_t offset, size_t len) {
   // Must be called after ringbuf_consume
   if (offset + len <= buffer_size_) {
@@ -262,7 +284,7 @@ void MiniTrace::Start() {
   CHECK_PTHREAD_CALL(pthread_create, (&the_trace->idlechecker_thread_, NULL, &IdleChecker,
                                       the_trace),
                                       "IdleChecker thread");
-  if (log_flag & kLogMessage)
+  if (log_flag & kLogMessage || log_flag & kConnectAPE)
     log_flag |= kDoMethodExited;
   runtime->GetInstrumentation()->AddListener(the_trace, log_flag & kInstListener);
   runtime->GetInstrumentation()->EnableMethodTracing();
@@ -278,13 +300,7 @@ void *MiniTrace::IdleChecker(void *arg) {
   Thread *self = Thread::Current();
   JNIEnvExt *env = self->GetJniEnv();
   LOG(INFO) << "MiniTrace IdleChecker tid " << self->GetTid();
-  // @TODO IPC with ape agent
 
-  // wait for first message taken, in order to wait initialization of various objects 
-  while (the_trace->msg_taken_ == false) {
-    usleep(500000); // 0.5 second
-  }
-  LOG(INFO) << "MiniTraceIdleChecker: First message taken";
 
   /**
    * Wait for idle state of MainLooper
@@ -330,17 +346,21 @@ void *MiniTrace::IdleChecker(void *arg) {
      * $ mainHandler.post(new EmptyRunnable());
      * $ idler.waitForIdle();
      */
-    ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
-    ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
-    env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
-    env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
-    env->CallVoidMethod(idler.get(), waitForIdle);
 
-    LOG(INFO) << "MiniTrace: IdleChecker with idx " << idx++;
-    the_trace->msg_taken_ = false;
-    while (the_trace->msg_taken_ == false) {
-      usleep(500000);
+    // Communicate with APE
+    read(the_trace->ape_socket_fd_);
+
+    while(1) {
+      ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
+      ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
+      env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
+      env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
+      env->CallVoidMethod(idler.get(), waitForIdle);
+
+      LOG(INFO) << "MiniTrace: IdleChecker with idx " << idx++;
     }
+    // wait
+
   }
 
   runtime->DetachCurrentThread();
@@ -599,6 +619,13 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
   }
 
   env_ = Thread::Current()->GetJniEnv();
+
+  if (log_flag & kConnectAPE) {
+    ape_socket_fd_ = CreateSocketAndCheckAPE();
+    CHECK(ape_socket_fd_ != -1);
+  } else {
+    ape_socket_fd_ = -1;
+  }
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
@@ -643,6 +670,22 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
       }
     } else if (UNLIKELY(method_message_next_ == method && main_message_ == this_object)) {
       LogMessage(thread, return_value);
+    }
+  }
+  if (log_flag_ & kConnectAPE) {
+    if (UNLIKELY(method_message_next_ == NULL)) {
+      if (strcmp(method->GetDeclaringClassDescriptor(), "Landroid/os/MessageQueue;") == 0) {
+        std::string name = method->GetName();
+        if (name.compare("next") == 0) {
+          method_message_next_ = method;
+          main_message_ = this_object;
+          get_clocktime();
+          LOG(INFO) << "MiniTrace: Message with time " << ;
+        }
+      }
+    } else if (UNLIKELY(method_message_next_ == method && main_message_ == this_object)) {
+      get_clocktime();
+      LOG(INFO) << "MiniTrace: Message with time " << ;
     }
   }
 }

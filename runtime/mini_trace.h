@@ -70,6 +70,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     kDoCoverage          = 0x00000080,
     kLogMessage          = 0x00000100, // log all messages on main looper
 
+    /* Flags used for communicate with ape */
+    kConnectAPE          = 0x00010000, // If set, communicates with APE
+
     /* Flags used for filtering objects */
     kLogFieldTypeFlags   = 0x0F000000,
     kLogFieldType0       = 0x01000000, // All the other fields
@@ -81,7 +84,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     kLogMethodType1      = 0x20000000, // Non-basic API methods
     kLogMethodType2      = 0x40000000, // UNUSED
     kLogMethodType3      = 0x80000000, // methods defined on app
-    kFlagAll             = 0xFF0001FF
+    kFlagAll             = 0xFF0101FF
   };
 
   enum CustomEventType {
@@ -326,6 +329,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   mirror::ArtMethod *method_message_next_;
   mirror::Object *main_message_;
 
+  int ape_socket_fd_;
   pthread_t idlechecker_thread_;
 
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
