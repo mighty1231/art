@@ -274,18 +274,25 @@ void MiniTrace::Start() {
     CHECK(!(log_flag & kLogFieldType1));
     CHECK(!(log_flag & kLogFieldType2));
     CHECK(!(log_flag & kLogMethodType2));
-    the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, 1024 * 1024);
+    int ape_socket_fd = -1;
+    if (log_flag & kConnectAPE) {
+      ape_socket_fd = CreateSocketAndCheckAPE();
+      CHECK(ape_socket_fd != -1);
+    }
+    the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, 1024 * 1024, ape_socket_fd);
   }
   Runtime* runtime = Runtime::Current();
   runtime->GetThreadList()->SuspendAll();
   CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
                                       the_trace),
                                       "Consumer thread");
-  CHECK_PTHREAD_CALL(pthread_create, (&the_trace->idlechecker_thread_, NULL, &IdleChecker,
-                                      the_trace),
-                                      "IdleChecker thread");
-  if (log_flag & kLogMessage || log_flag & kConnectAPE)
-    log_flag |= kDoMethodExited;
+  if (log_flag & kConnectAPE) {
+    CHECK_PTHREAD_CALL(pthread_create, (&the_trace->idlechecker_thread_, NULL, &IdleChecker,
+                                        the_trace),
+                                        "IdleChecker thread");
+  }
+  if (log_flag & (kLogMessage | kConnectAPE))-
+    log_flag |= kDoMethodEntered | kDoMethodExited;
   runtime->GetInstrumentation()->AddListener(the_trace, log_flag & kInstListener);
   runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
@@ -301,6 +308,9 @@ void *MiniTrace::IdleChecker(void *arg) {
   JNIEnvExt *env = self->GetJniEnv();
   LOG(INFO) << "MiniTrace IdleChecker tid " << self->GetTid();
 
+  while (the_trace->msg_taken_ == false) {
+    usleep(500000); // 0.5 second
+  }
 
   /**
    * Wait for idle state of MainLooper
@@ -310,6 +320,10 @@ void *MiniTrace::IdleChecker(void *arg) {
    * $ mainQueue = mainlooper.getQueue();
    * $ mainHandler = new Handler(mainLooper);
    */
+  // timeval now;
+  // gettimeofday(&now, NULL);
+  // int64_t when = now.tv_sec * 1000LL + now.tv_usec / 1000;
+
   ScopedLocalRef<jclass> looperClass(env, env->FindClass("android/os/Looper"));
   ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
   ScopedLocalRef<jclass> handlerClass(env, env->FindClass("android/os/Handler"));
@@ -348,19 +362,62 @@ void *MiniTrace::IdleChecker(void *arg) {
      */
 
     // Communicate with APE
-    read(the_trace->ape_socket_fd_);
+    // read(the_trace->ape_socket_fd_);
 
+    // int32_t last_msec1 = 0;
+    // int32_t last_msec2 = 0;
+    int32_t event_id;
+    char goodmsg = 1;
+
+    // 1st idle
+    {
+      ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
+      ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
+      env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
+      env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
+      env->CallVoidMethod(idler.get(), waitForIdle);
+    }
+    usleep(2 * 1000 * 1000); // 2 seconds
+    {
+      ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
+      ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
+      env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
+      env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
+      env->CallVoidMethod(idler.get(), waitForIdle);
+    }
+    write(the_trace->ape_socket_fd_, &goodmsg, 1);
+
+    // 2nd, 3rd... idles
+    timeval last_enter_;
     while(1) {
       ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
       ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
       env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
       env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
       env->CallVoidMethod(idler.get(), waitForIdle);
+      memcpy(&last_enter_, &the_trace->last_msgq_nxt_enter_, sizeof timeval);
+      the_trace->msg_taken = false;
 
-      LOG(INFO) << "MiniTrace: IdleChecker with idx " << idx++;
+      usleep(500000); // Wait 0.5 seconds
+      // if new message is appeared, then wait for another idle
+      if (memcmp(&the_trace->last_msgq_nxt_enter_, &last_enter_, sizeof timeval) != 0) {
+        ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
+        ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
+        env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
+        env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
+        env->CallVoidMethod(idler.get(), waitForIdle);
+      }
+
+      // at first, get idle status!
+      write(the_trace->ape_socket_fd_, &goodmsg, 1);
+
+      // receive System.currentTimeMillis
+      read(the_trace->ape_socket_fd, &event_id, 4);
+      // read(the_trace->ape_socket_fd, &last_msec1, 4);
+      // read(the_trace->ape_socket_fd, &last_msec2, 4);
+
+      LOG(INFO) << "MiniTrace: received event id " << event_id;
     }
-    // wait
-
   }
 
   runtime->DetachCurrentThread();
@@ -592,7 +649,7 @@ void *MiniTrace::ConsumerFunction(void *arg) {
 }
 
 MiniTrace::MiniTrace(int socket_fd, const char *prefix,
-        uint32_t log_flag, uint32_t buffer_size)
+        uint32_t log_flag, uint32_t buffer_size, int ape_socket_fd)
     : socket_fd_(socket_fd), data_bin_index_(0),
       buf_(new uint8_t[buffer_size]()),
       wids_registered_lock_(new Mutex("Ringbuf worker lock")),
@@ -602,7 +659,8 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
       traced_method_lock_(new Mutex("MiniTrace method lock")),
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")),
-      method_message_next_(NULL), main_message_(NULL) {
+      method_msgq_next_(NULL), main_msgq_(NULL), msg_taken_(false),
+      ape_socket_fd_(ape_socket_fd) {
 
   // Set prefix
   strcpy(prefix_, prefix);
@@ -619,13 +677,6 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
   }
 
   env_ = Thread::Current()->GetJniEnv();
-
-  if (log_flag & kConnectAPE) {
-    ape_socket_fd_ = CreateSocketAndCheckAPE();
-    CHECK(ape_socket_fd_ != -1);
-  } else {
-    ape_socket_fd_ = -1;
-  }
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
@@ -648,7 +699,22 @@ void MiniTrace::FieldWritten(Thread* thread, mirror::Object* this_object,
 
 void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
                           mirror::ArtMethod* method, uint32_t dex_pc) {
-  LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodEntered);
+  if (log_flag_ & kDoMethodEntered)
+    LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodEntered);
+
+  // Assume the first called next() is called with MessageQueue from main thread
+  if (UNLIKELY(method_message_next_ == NULL)) {
+    if (strcmp(method->GetDeclaringClassDescriptor(), "Landroid/os/MessageQueue;") == 0) {
+      str::string name = method->GetName();
+      if (name.compare("next") == 0) {
+        method_msgq_next_ = method;
+        main_msgq_ = this_object;
+      }
+    }
+  }
+  if ((log_flag_ & kConnectAPE) && UNLIKELY(method_msgq_next_ == method && main_msgq_ == this_object)) {
+    gettimeofday(&last_msgq_nxt_enter_, NULL);
+  }
 }
 
 void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
@@ -658,34 +724,14 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
     LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodExited);
 
   if (log_flag_ & kLogMessage) {
-    // Assume the first called next() is called with MessageQueue from main thread
-    if (UNLIKELY(method_message_next_ == NULL)) {
-      if (strcmp(method->GetDeclaringClassDescriptor(), "Landroid/os/MessageQueue;") == 0) {
-        std::string name = method->GetName();
-        if (name.compare("next") == 0) {
-          method_message_next_ = method;
-          main_message_ = this_object;
-          LogMessage(thread, return_value);
-        }
-      }
-    } else if (UNLIKELY(method_message_next_ == method && main_message_ == this_object)) {
+    if (UNLIKELY(method_msgq_next_ == method && main_msgq_ == this_object))
       LogMessage(thread, return_value);
-    }
   }
+
   if (log_flag_ & kConnectAPE) {
-    if (UNLIKELY(method_message_next_ == NULL)) {
-      if (strcmp(method->GetDeclaringClassDescriptor(), "Landroid/os/MessageQueue;") == 0) {
-        std::string name = method->GetName();
-        if (name.compare("next") == 0) {
-          method_message_next_ = method;
-          main_message_ = this_object;
-          get_clocktime();
-          LOG(INFO) << "MiniTrace: Message with time " << ;
-        }
-      }
-    } else if (UNLIKELY(method_message_next_ == method && main_message_ == this_object)) {
-      get_clocktime();
-      LOG(INFO) << "MiniTrace: Message with time " << ;
+    if (UNLIKELY(method_msgq_next_ == method && main_msgq_ == this_object)) {
+      msg_taken_ = true;
+      gettimeofday(&last_msgq_nxt_exit_, NULL);
     }
   }
 }

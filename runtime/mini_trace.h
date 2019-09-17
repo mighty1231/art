@@ -25,6 +25,7 @@
 #include <queue>
 #include <unordered_map>
 #include <pthread.h>
+#include <sys/time.h>
 
 #include "atomic.h"
 #include "base/macros.h"
@@ -221,7 +222,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   };
 
  private:
-  explicit MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag, uint32_t buffer_size);
+  explicit MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag,
+                     uint32_t buffer_size, int ape_socket_fd);
 
   void LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
                            instrumentation::Instrumentation::InstrumentationEvent event)
@@ -326,8 +328,11 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   Mutex *traced_thread_lock_;
 
   JNIEnvExt *env_;
-  mirror::ArtMethod *method_message_next_;
-  mirror::Object *main_message_;
+  mirror::ArtMethod *method_msgq_next_;
+  mirror::Object *main_msgq_;
+  volatile bool msg_taken_;
+  volatile timeval last_msgq_nxt_enter_;
+  volatile timeval last_msgq_nxt_exit_;
 
   int ape_socket_fd_;
   pthread_t idlechecker_thread_;
