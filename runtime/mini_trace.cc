@@ -610,7 +610,7 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")),
       method_msgq_next_(NULL), main_msgq_(NULL), msg_taken_(false),
-      ape_socket_fd_(ape_socket_fd) {
+      ape_socket_fd_(ape_socket_fd), idlechecker_thread_(0) {
 
   // Set prefix
   strcpy(prefix_, prefix);
@@ -995,7 +995,7 @@ ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
   MiniTraceThreadFlag flag = self->GetMiniTraceFlag();
   if (flag == kMiniTraceFirstSeen) {
     pthread_t pself = pthread_self();
-    if (pself == consumer_thread_) {
+    if (pself == consumer_thread_ || (idlechecker_thread_ != 0 && pself == idlechecker_thread_)) {
       self->SetMiniTraceFlag(kMiniTraceExclude);
       return NULL;
     }
