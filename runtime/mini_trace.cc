@@ -246,7 +246,7 @@ void MiniTrace::WriteRingBuffer(ringbuf_worker_t *worker, const char *src, size_
 void MiniTrace::Start() {
   uid_t uid = getuid();
   // Do not target system app
-  if ((uid % AID_USER) < AID_APP)
+  if (uid != 0 && ((uid % AID_USER) < AID_APP))
     return;
 
   char prefix[100];
