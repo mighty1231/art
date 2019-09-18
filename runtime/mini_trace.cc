@@ -195,7 +195,7 @@ static int CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid, uint32_t *log_
   return -1;
 }
 
-static int CreateSocketAndCheckAPE(void *buf, uid_t uid, uint32_t *log_flag) {
+static int CreateSocketAndCheckAPE() {
   int socket_fd;
   sockaddr_un server_addr;
   if ((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
@@ -291,8 +291,8 @@ void MiniTrace::Start() {
                                         the_trace),
                                         "IdleChecker thread");
   }
-  if (log_flag & (kLogMessage | kConnectAPE))-
-    log_flag |= kDoMethodEntered | kDoMethodExited;
+  if (log_flag & (kLogMessage | kConnectAPE))
+    log_flag |= (kDoMethodEntered | kDoMethodExited);
   runtime->GetInstrumentation()->AddListener(the_trace, log_flag & kInstListener);
   runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
@@ -351,72 +351,22 @@ void *MiniTrace::IdleChecker(void *arg) {
   ScopedLocalRef<jobject> mainQueue(env, env->CallObjectMethod(mainLooper.get(), getQueue));
   ScopedLocalRef<jobject> mainHandler(env, env->NewObject(handlerClass.get(), handlerInit, mainLooper.get()));
 
-  int idx = 0;
+  timeval now;
+  int64_t now_long;
   while (1) {
-    /**
-     * Implemented following JAVA code
-     * $ Idler idler = new Idler(null);
-     * $ mainQueue.addIdleHandler(idler);
-     * $ mainHandler.post(new EmptyRunnable());
-     * $ idler.waitForIdle();
-     */
+    ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
+    ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
+    env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
+    env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
+    env->CallVoidMethod(idler.get(), waitForIdle);
+    the_trace->msg_taken_ = false;
+    gettimeofday(&now, NULL);
+    now_long = now.tv_sec * 1000LL + now.tv_usec / 1000;
 
-    // Communicate with APE
-    // read(the_trace->ape_socket_fd_);
-
-    // int32_t last_msec1 = 0;
-    // int32_t last_msec2 = 0;
-    int32_t event_id;
-    char goodmsg = 1;
-
-    // 1st idle
-    {
-      ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
-      ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
-      env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
-      env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
-      env->CallVoidMethod(idler.get(), waitForIdle);
-    }
-    usleep(2 * 1000 * 1000); // 2 seconds
-    {
-      ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
-      ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
-      env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
-      env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
-      env->CallVoidMethod(idler.get(), waitForIdle);
-    }
-    write(the_trace->ape_socket_fd_, &goodmsg, 1);
-
-    // 2nd, 3rd... idles
-    timeval last_enter_;
-    while(1) {
-      ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
-      ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
-      env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
-      env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
-      env->CallVoidMethod(idler.get(), waitForIdle);
-      memcpy(&last_enter_, &the_trace->last_msgq_nxt_enter_, sizeof timeval);
-      the_trace->msg_taken = false;
-
-      usleep(500000); // Wait 0.5 seconds
-      // if new message is appeared, then wait for another idle
-      if (memcmp(&the_trace->last_msgq_nxt_enter_, &last_enter_, sizeof timeval) != 0) {
-        ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
-        ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
-        env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
-        env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
-        env->CallVoidMethod(idler.get(), waitForIdle);
-      }
-
-      // at first, get idle status!
-      write(the_trace->ape_socket_fd_, &goodmsg, 1);
-
-      // receive System.currentTimeMillis
-      read(the_trace->ape_socket_fd, &event_id, 4);
-      // read(the_trace->ape_socket_fd, &last_msec1, 4);
-      // read(the_trace->ape_socket_fd, &last_msec2, 4);
-
-      LOG(INFO) << "MiniTrace: received event id " << event_id;
+    // write all idle state
+    write(the_trace->ape_socket_fd_, &now_long, sizeof (uint64_t));
+    while (the_trace->msg_taken_ == false) {
+      usleep(500000);
     }
   }
 
@@ -703,9 +653,9 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
     LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodEntered);
 
   // Assume the first called next() is called with MessageQueue from main thread
-  if (UNLIKELY(method_message_next_ == NULL)) {
+  if (UNLIKELY(method_msgq_next_ == NULL)) {
     if (strcmp(method->GetDeclaringClassDescriptor(), "Landroid/os/MessageQueue;") == 0) {
-      str::string name = method->GetName();
+      std::string name = method->GetName();
       if (name.compare("next") == 0) {
         method_msgq_next_ = method;
         main_msgq_ = this_object;

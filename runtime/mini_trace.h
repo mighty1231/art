@@ -331,8 +331,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   mirror::ArtMethod *method_msgq_next_;
   mirror::Object *main_msgq_;
   volatile bool msg_taken_;
-  volatile timeval last_msgq_nxt_enter_;
-  volatile timeval last_msgq_nxt_exit_;
+  timeval last_msgq_nxt_enter_;
+  timeval last_msgq_nxt_exit_;
 
   int ape_socket_fd_;
   pthread_t idlechecker_thread_;
