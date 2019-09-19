@@ -98,15 +98,13 @@ class MiniTrace : public instrumentation::InstrumentationListener {
                      Locks::thread_list_lock_,
                      Locks::thread_suspend_count_lock_,
                      Locks::trace_lock_);
-  static void Stop()
+
+  static void Shutdown()
       LOCKS_EXCLUDED(Locks::mutator_lock_,
                      Locks::thread_list_lock_,
                      Locks::trace_lock_);
-  static void Shutdown() LOCKS_EXCLUDED(Locks::trace_lock_);
 
   static void Checkout() LOCKS_EXCLUDED(Locks::trace_lock_);
-
-  static TracingMode GetMethodTracingMode() LOCKS_EXCLUDED(Locks::trace_lock_);
 
   static bool* GetExecutionData(Thread* self, mirror::ArtMethod* method)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)

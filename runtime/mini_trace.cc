@@ -320,10 +320,6 @@ void *MiniTrace::IdleChecker(void *arg) {
    * $ mainQueue = mainlooper.getQueue();
    * $ mainHandler = new Handler(mainLooper);
    */
-  // timeval now;
-  // gettimeofday(&now, NULL);
-  // int64_t when = now.tv_sec * 1000LL + now.tv_usec / 1000;
-
   ScopedLocalRef<jclass> looperClass(env, env->FindClass("android/os/Looper"));
   ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
   ScopedLocalRef<jclass> handlerClass(env, env->FindClass("android/os/Handler"));
@@ -374,12 +370,12 @@ void *MiniTrace::IdleChecker(void *arg) {
   return NULL;
 }
 
-void MiniTrace::Stop() {
-  // Stop would not be called...
+void MiniTrace::Shutdown() {
+  // Shutdown would not be called...
   Runtime* runtime = Runtime::Current();
   MiniTrace* the_trace = NULL;
   {
-    // This block prevents more than one invocation for MiniTrace::Stop
+    // This block prevents more than one invocation for MiniTrace::Shutdown
     MutexLock mu(Thread::Current(), *Locks::trace_lock_);
     if (the_trace_ == NULL)
       return;
@@ -390,7 +386,7 @@ void MiniTrace::Stop() {
   }
   if (the_trace != NULL) {
     // Wait for consumer
-    LOG(INFO) << "MiniTrace: Stop() called";
+    LOG(INFO) << "MiniTrace: Shutdown() called";
     Thread *consumer_thread = NULL;
     ThreadList *runtime_thread_list = runtime->GetThreadList();
     if (the_trace->consumer_runs_ && the_trace->consumer_tid_ != 0)
@@ -405,7 +401,7 @@ void MiniTrace::Stop() {
       the_trace->consumer_runs_ = false;
       runtime_thread_list->Resume(consumer_thread);
       CHECK_PTHREAD_CALL(pthread_join, (the_trace->consumer_thread_, NULL),
-          "consumer thread shutdown");
+          "consumer thread join");
     }
 
     // delete trace objects
@@ -421,13 +417,6 @@ void MiniTrace::Stop() {
   }
 }
 
-void MiniTrace::Shutdown() {
-  if (GetMethodTracingMode() != kTracingInactive) {
-    LOG(INFO) << "MiniTrace: Shutdown...";
-    Stop();
-  }
-}
-
 void MiniTrace::Checkout() {
   Thread *self = Thread::Current();
   MiniTrace *the_trace = NULL;
@@ -440,16 +429,6 @@ void MiniTrace::Checkout() {
   else {
     LOG(INFO) << "MiniTrace: Checkout called";
     the_trace->data_bin_index_ ++;
-  }
-}
-
-
-TracingMode MiniTrace::GetMethodTracingMode() {
-  MutexLock mu(Thread::Current(), *Locks::trace_lock_);
-  if (the_trace_ == NULL) {
-    return kTracingInactive;
-  } else {
-    return kMethodTracingActive;
   }
 }
 
