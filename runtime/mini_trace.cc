@@ -56,8 +56,8 @@ namespace art {
  * Header format:
  *     u4  magic ('MiTr')
  *     u2  version
- *     u4  log_flag
  *     u2  offset to data
+ *     u4  log_flag
  *     u8  starting timestamp in milliseconds
  *         in C:
  *           gettimeofday(&now, NULL); int64_t timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
@@ -99,7 +99,7 @@ enum MiniTraceAction {
 
 static const uint16_t kMiniTraceHeaderLength     = 4+2+2+8+4;
 static const uint16_t kMiniTraceVersion          = 1;
-static const uint32_t kMiniTraceMagic            = 0x4D695472; // MiTr
+static const uint32_t kMiniTraceMagic            = 0x7254694D; // MiTr
 
 MiniTrace* volatile MiniTrace::the_trace_ = NULL;
 const char *MiniTrace::threadnames_to_exclude[] = {
@@ -513,6 +513,7 @@ void *MiniTrace::ConsumerFunction(void *arg) {
     Append4LE(header, kMiniTraceMagic);
     Append2LE(header + 4, kMiniTraceVersion);
     Append2LE(header + 6, kMiniTraceHeaderLength);
+    Append4LE(header + 8, the_trace->log_flag_);
 
     uint64_t timestamp;
     {
@@ -520,8 +521,7 @@ void *MiniTrace::ConsumerFunction(void *arg) {
       gettimeofday(&now, NULL);
       timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
     }
-    Append8LE(header + 8, timestamp);
-    Append4LE(header + 16, the_trace->log_flag_);
+    Append8LE(header + 12, timestamp);
   }
 
   // Create empty file to log data
