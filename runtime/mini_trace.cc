@@ -692,7 +692,7 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
       traced_method_lock_(new Mutex("MiniTrace method lock")),
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")),
-      method_msgq_next_(NULL), main_msgq_(NULL), msg_taken_(false),
+      main_msgq_(NULL), msg_taken_(false),
       ape_socket_fd_(ape_socket_fd), idlechecker_thread_(0) {
 
   // Set prefix
@@ -710,6 +710,14 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
   }
 
   env_ = Thread::Current()->GetJniEnv();
+
+  ScopedObjectAccess soa(env_);
+
+  // is it possible to find class?
+  // Landroid/app/ActivityThread;, handleResumeActivity, (Landroid/os/IBinder;ZZZ)V
+  ScopedLocalRef<jclass> queueClass(env_, env_->FindClass("android/os/MessageQueue"));
+  jmethodID next = env_->GetMethodID(queueClass.get(), "next", "()Landroid/os/Message;");
+  method_msgq_next_ = soa.DecodeMethod(next);
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
@@ -736,14 +744,8 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
     LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodEntered);
 
   // Assume the first called next() is called with MessageQueue from main thread
-  if (UNLIKELY(method_msgq_next_ == NULL)) {
-    if (strcmp(method->GetDeclaringClassDescriptor(), "Landroid/os/MessageQueue;") == 0) {
-      std::string name = method->GetName();
-      if (name.compare("next") == 0) {
-        method_msgq_next_ = method;
-        main_msgq_ = this_object;
-      }
-    }
+  if (UNLIKELY(main_msgq_ == NULL)) {
+    main_msgq_ = this_object;
   }
 }
 
