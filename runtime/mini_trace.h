@@ -88,11 +88,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     kFlagAll             = 0xFF0101FF
   };
 
-  enum CustomEventType {
-    // Last 3 bits should be zero
-    kMainMessageQueueNextExited = 0x00000010,
-  };
-
   static void Start()
       LOCKS_EXCLUDED(Locks::mutator_lock_,
                      Locks::thread_list_lock_,
@@ -329,8 +324,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   mirror::ArtMethod *method_msgq_next_;
   mirror::Object *main_msgq_;
   volatile bool msg_taken_;
-  timeval last_msgq_nxt_enter_;
-  timeval last_msgq_nxt_exit_;
 
   int ape_socket_fd_;
   pthread_t idlechecker_thread_;

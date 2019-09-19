@@ -66,25 +66,24 @@ namespace art {
  *         interpret in Python:
  *           datetime.datetime.fromtimestamp(timestamp/1000.0)
  *
- * Method event - length 6
+ * Method event - length 6 (action 0, 1, 2)
  *   int16_t tid;
- *   int32_t art_method_with_action
+ *   int32_t art_method_with_action;
  *
- * Field event - length 14
+ * Field event - length 14 (action 3, 4)
  *   int16_t tid;
  *   int32_t art_field_with_action;
  *   int32_t this_obj;
  *   int32_t dex_pc;
  *
- * Exception event - variable length
+ * Exception / Message event - variable length (action 5, 6)
  *   int16_t tid;
  *   int32_t dump_length_with_action;
  *   char dumped[];
  *
- * Custom event - length 10
- *   int16_t tid;
- *   int32_t content_length_with_action;
- *   char message_content[];
+ * Idle event - length 10 (no action, differentiate this with tid=0)
+ *   int16_t tid=0;
+ *   uint64_t timestamp_in_ms;
  */
 enum MiniTraceAction {
     kMiniTraceMethodEnter = 0x00,       // method entry
@@ -93,7 +92,7 @@ enum MiniTraceAction {
     kMiniTraceFieldRead = 0x03,         // field read
     kMiniTraceFieldWrite = 0x04,        // field write
     kMiniTraceExceptionCaught = 0x05,   // exception caught
-    kMiniTraceCustomEvent = 0x06,       // custom event
+    kMiniTraceMessageEvent = 0x06,      // message
     kMiniTraceActionMask = 0x07,        // three bits
 };
 
@@ -121,7 +120,7 @@ static void Append4LE(char* buf, uint32_t val) {
   *(uint32_t *)buf = val;
 }
 
-static void Append8LE(char* buf, uint32_t val) {
+static void Append8LE(char* buf, uint64_t val) {
   *(uint64_t *)buf = val;
 }
 
@@ -140,7 +139,7 @@ static void Append4LE(char* buf, uint32_t val) {
   *buf++ = static_cast<char>(val >> 24);
 }
 
-static void Append8LE(char* buf, uint32_t val) {
+static void Append8LE(char* buf, uint64_t val) {
   *buf++ = static_cast<char>(val);
   *buf++ = static_cast<char>(val >> 8);
   *buf++ = static_cast<char>(val >> 16);
@@ -351,6 +350,20 @@ void *MiniTrace::IdleChecker(void *arg) {
     usleep(500000); // 0.5 second
   }
 
+  // Don't log for this thread,
+  // just get ringbuf worker and log idle time
+  ringbuf_worker_t *ringbuf_worker = NULL;
+  {
+    MutexLock mu(self, *the_trace->wids_registered_lock_);
+    for (size_t i=0; i<MAX_THREAD_COUNT; i++) {
+      if (the_trace->wids_registered_[i] == false) {
+        ringbuf_worker = ringbuf_register(the_trace->ringbuf_, i);
+        the_trace->wids_registered_[i] = true;
+        break;
+      }
+    }
+  }
+
   /**
    * Wait for idle state of MainLooper
    * Technique borrowed from Instrumentation$waitForIdleSync
@@ -387,7 +400,9 @@ void *MiniTrace::IdleChecker(void *arg) {
   ScopedLocalRef<jobject> mainHandler(env, env->NewObject(handlerClass.get(), handlerInit, mainLooper.get()));
 
   timeval now;
-  int64_t now_long;
+  uint64_t now_long;
+  char *buf = new char[10]();
+  Append2LE(buf, 0); // tid
   while (1) {
     ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
     ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
@@ -399,12 +414,15 @@ void *MiniTrace::IdleChecker(void *arg) {
     now_long = now.tv_sec * 1000LL + now.tv_usec / 1000;
 
     // write all idle state
+    Append8LE(buf + 2, now_long);
+    the_trace->WriteRingBuffer(ringbuf_worker, buf, 10);
     write(the_trace->ape_socket_fd_, &now_long, sizeof (uint64_t));
     while (the_trace->msg_taken_ == false) {
       usleep(500000);
     }
   }
 
+  delete buf;
   runtime->DetachCurrentThread();
   return NULL;
 }
@@ -431,6 +449,13 @@ void MiniTrace::Shutdown() {
     if (the_trace->consumer_runs_ && the_trace->consumer_tid_ != 0)
       consumer_thread = runtime_thread_list->FindThreadByThreadId(the_trace->consumer_tid_);
 
+    // kill IdleChecker
+    if (the_trace->log_flag_ & kConnectAPE) {
+      CHECK_PTHREAD_CALL(pthread_kill, (the_trace->idlechecker_thread_, SIGQUIT),
+          "idle checker kill");
+      close(the_trace->ape_socket_fd_);
+    }
+
     runtime_thread_list->SuspendAll();
     runtime->GetInstrumentation()->DisableMethodTracing();
     runtime->GetInstrumentation()->RemoveListener(the_trace, the_trace->log_flag_ & kInstListener);
@@ -442,6 +467,7 @@ void MiniTrace::Shutdown() {
       CHECK_PTHREAD_CALL(pthread_join, (the_trace->consumer_thread_, NULL),
           "consumer thread join");
     }
+    close(the_trace->socket_fd_);
 
     // delete trace objects
     delete the_trace->wids_registered_lock_;
@@ -719,9 +745,6 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
       }
     }
   }
-  if ((log_flag_ & kConnectAPE) && UNLIKELY(method_msgq_next_ == method && main_msgq_ == this_object)) {
-    gettimeofday(&last_msgq_nxt_enter_, NULL);
-  }
 }
 
 void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
@@ -738,7 +761,6 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
   if (log_flag_ & kConnectAPE) {
     if (UNLIKELY(method_msgq_next_ == method && main_msgq_ == this_object)) {
       msg_taken_ = true;
-      gettimeofday(&last_msgq_nxt_exit_, NULL);
     }
   }
 }
@@ -797,7 +819,7 @@ void MiniTrace::LogMessage(Thread* thread, const JValue& message) {
   int32_t record_size = length + 2 + 4 + 1;
   char *buf = new char[record_size]();
   Append2LE(buf, thread->GetTid());
-  Append4LE(buf + 2, (record_size << 3) | kMiniTraceCustomEvent);
+  Append4LE(buf + 2, (record_size << 3) | kMiniTraceMessageEvent);
   strcpy(buf + 6, message_cstring);
 
   env->ReleaseStringUTFChars((jstring) message_string.get(), message_cstring);
@@ -1080,7 +1102,7 @@ ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
     }
     if (ringbuf_worker == NULL) {
       // No avilable worker slot
-      LOG(ERROR) << "MiniTrace: The number of active threads are too big";
+      LOG(ERROR) << "MiniTrace: There are too many active threads";
       self->SetMiniTraceFlag(kMiniTraceExclude);
       return NULL;
     }
