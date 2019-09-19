@@ -47,6 +47,25 @@
 namespace art {
 
 /**
+ * File format:
+ *     header
+ *     record 0
+ *     record 1
+ *     ...
+ *
+ * Header format:
+ *     u4  magic ('MiTr')
+ *     u2  version
+ *     u4  log_flag
+ *     u2  offset to data
+ *     u8  starting timestamp in milliseconds
+ *         in C:
+ *           gettimeofday(&now, NULL); int64_t timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
+ *         in JAVA:
+ *           System.currentTimeMillis();
+ *         interpret in Python:
+ *           datetime.datetime.fromtimestamp(timestamp/1000.0)
+ *
  * Method event - length 6
  *   int16_t tid;
  *   int32_t art_method_with_action
@@ -78,6 +97,11 @@ enum MiniTraceAction {
     kMiniTraceActionMask = 0x07,        // three bits
 };
 
+
+static const uint16_t kMiniTraceHeaderLength     = 4+2+2+8+4;
+static const uint16_t kMiniTraceVersion          = 1;
+static const uint32_t kMiniTraceMagic            = 0x4D695472; // MiTr
+
 MiniTrace* volatile MiniTrace::the_trace_ = NULL;
 const char *MiniTrace::threadnames_to_exclude[] = {
   THREAD_FinalizerDaemon,
@@ -97,6 +121,10 @@ static void Append4LE(char* buf, uint32_t val) {
   *(uint32_t *)buf = val;
 }
 
+static void Append8LE(char* buf, uint32_t val) {
+  *(uint64_t *)buf = val;
+}
+
 #else /* _BYTE_ORDER == _BIG_ENDIAN */
 static_assert(_BYTE_ORDER == _BIG_ENDIAN);
 
@@ -110,6 +138,17 @@ static void Append4LE(char* buf, uint32_t val) {
   *buf++ = static_cast<char>(val >> 8);
   *buf++ = static_cast<char>(val >> 16);
   *buf++ = static_cast<char>(val >> 24);
+}
+
+static void Append8LE(char* buf, uint32_t val) {
+  *buf++ = static_cast<char>(val);
+  *buf++ = static_cast<char>(val >> 8);
+  *buf++ = static_cast<char>(val >> 16);
+  *buf++ = static_cast<char>(val >> 24);
+  *buf++ = static_cast<char>(val >> 32);
+  *buf++ = static_cast<char>(val >> 40);
+  *buf++ = static_cast<char>(val >> 48);
+  *buf++ = static_cast<char>(val >> 56);
 }
 
 #endif /* _BYTE_ORDER */
@@ -441,6 +480,23 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   Thread *self = Thread::Current();
   LOG(INFO) << "MiniTrace: Consumer thread attached with tid " << self->GetTid();
   the_trace->consumer_tid_ = self->GetTid();
+  // Create header
+  char *header;
+  {
+    header = new char[kMiniTraceHeaderLength];
+    Append4LE(header, kMiniTraceMagic);
+    Append2LE(header + 4, kMiniTraceVersion);
+    Append2LE(header + 6, kMiniTraceHeaderLength);
+
+    uint64_t timestamp;
+    {
+      timeval now;
+      gettimeofday(&now, NULL);
+      timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
+    }
+    Append8LE(header + 8, timestamp);
+    Append4LE(header + 16, the_trace->log_flag_);
+  }
 
   // Create empty file to log data
   int last_bin_index = the_trace->data_bin_index_;
@@ -452,6 +508,17 @@ void *MiniTrace::ConsumerFunction(void *arg) {
 
   File *trace_data_file_ = OS::CreateEmptyFile(trace_data_filename.c_str());
   CHECK(trace_data_file_ != NULL);
+
+  // Write header
+  if (!trace_data_file_->WriteFully(header, kMiniTraceHeaderLength)) {
+    std::string detail(StringPrintf("MiniTrace: Trace data write failed: %s", strerror(errno)));
+    PLOG(ERROR) << detail;
+    {
+      Locks::mutator_lock_->ExclusiveLock(self);
+      ThrowRuntimeException("%s", detail.c_str());
+      Locks::mutator_lock_->ExclusiveUnlock(self);
+    }
+  }
 
   File *trace_method_info_file_ = OS::CreateEmptyFile(trace_method_info_filename.c_str());
   CHECK(trace_method_info_file_ != NULL);
@@ -466,22 +533,32 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   size_t len, woff;
   std::string buffer;
   while (the_trace->consumer_runs_) {
-    // If data_bin_index_ is modified from Checkout, handle for it
-    if (last_bin_index != the_trace->data_bin_index_) {
-      // release and send its filename to socket
-      CHECK(trace_data_file_->Flush() == 0);
-      CHECK(trace_data_file_->Close() == 0);
-      write(the_trace->socket_fd_, trace_data_filename.c_str(), trace_data_filename.length() + 1);
-      last_bin_index = the_trace->data_bin_index_;
-      trace_data_filename.assign(StringPrintf("%sdata_%d.bin",
-          the_trace->prefix_, last_bin_index));
-      trace_data_file_ = OS::CreateEmptyFile(trace_data_filename.c_str());
-      CHECK(trace_data_file_ != NULL);
-    }
-
     // Dump Buffer
     len = ringbuf_consume(the_trace->ringbuf_, &woff);
     if (len > 0) {
+      // If data_bin_index_ is modified, flush previous data and create a new file
+      if (last_bin_index != the_trace->data_bin_index_) {
+        // release and send its filename to socket
+        CHECK(trace_data_file_->Flush() == 0);
+        CHECK(trace_data_file_->Close() == 0);
+        write(the_trace->socket_fd_, trace_data_filename.c_str(), trace_data_filename.length() + 1);
+        last_bin_index = the_trace->data_bin_index_;
+        trace_data_filename.assign(StringPrintf("%sdata_%d.bin",
+            the_trace->prefix_, last_bin_index));
+        trace_data_file_ = OS::CreateEmptyFile(trace_data_filename.c_str());
+        CHECK(trace_data_file_ != NULL);
+
+        // Write header
+        if (!trace_data_file_->WriteFully(header, kMiniTraceHeaderLength)) {
+          std::string detail(StringPrintf("MiniTrace: Trace data write failed: %s", strerror(errno)));
+          PLOG(ERROR) << detail;
+          {
+            Locks::mutator_lock_->ExclusiveLock(self);
+            ThrowRuntimeException("%s", detail.c_str());
+            Locks::mutator_lock_->ExclusiveUnlock(self);
+          }
+        }
+      }
       the_trace->ReadBuffer(databuf, woff, len);
       ringbuf_release(the_trace->ringbuf_, len);
 
@@ -556,6 +633,7 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   }
 
   delete databuf;
+  delete header;
   CHECK(trace_data_file_->Flush() == 0);
   CHECK(trace_data_file_->Close() == 0);
   CHECK(trace_method_info_file_->Flush() == 0);
@@ -725,6 +803,7 @@ void MiniTrace::LogMessage(Thread* thread, const JValue& message) {
   env->ReleaseStringUTFChars((jstring) message_string.get(), message_cstring);
   WriteRingBuffer(ringbuf_worker, buf, record_size);
   thread->SetMiniTraceFlag(orig_flag);
+  delete buf;
 }
 
 void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
