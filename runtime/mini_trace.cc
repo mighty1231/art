@@ -67,28 +67,29 @@ namespace art {
  *           datetime.datetime.fromtimestamp(timestamp/1000.0)
  *
  * Method event - length 6 (action 0, 1, 2)
- *   int16_t tid;
- *   int32_t art_method_with_action;
+ *   u2 tid;
+ *   u4 art_method_with_action;
  *
- * Field event - length 14 (action 3, 4)
- *   int16_t tid;
- *   int32_t art_field_with_action;
- *   int32_t this_obj;
- *   int32_t dex_pc;
+ * Field event - length 16 (action 3, 4)
+ *   u2 tid;
+ *   u4 art_field_with_action;
+ *   u4 this_obj;
+ *   u4 dex_pc;
+ *   u2 idx;
  *
  * Exception / Message event - variable length (action 5, 6)
- *   int16_t tid;
- *   int32_t dump_length_with_action;
+ *   u2 tid;
+ *   u4 dump_length_with_action;
  *   char dumped[];
  *
  *
  * Idle event - length 10 (no action, differentiate this with tid=0)
- *   int16_t tid=0;
- *   uint64_t timestamp_in_ms;
+ *   u2 tid=0;
+ *   u8 timestamp_in_ms;
  *
  * Pinging event - length 10 (no action, differentiate this with tid=0)
- *   int16_t tid=1;
- *   uint64_t timestamp_in_ms;
+ *   u2 tid=1;
+ *   u8 timestamp_in_ms;
  */
 enum MiniTraceAction {
     kMiniTraceMethodEnter = 0x00,       // method entry
@@ -101,8 +102,8 @@ enum MiniTraceAction {
     kMiniTraceActionMask = 0x07,        // three bits
 };
 
-static const uint16_t kMiniTraceHeaderLength     = 4+2+2+8+4;
-static const uint16_t kMiniTraceVersion          = 1;
+static const uint16_t kMiniTraceHeaderLength     = 4+2+2+4+8;
+static const uint16_t kMiniTraceVersion          = 2;
 static const uint32_t kMiniTraceMagic            = 0x7254694D; // MiTr
 
 MiniTrace* volatile MiniTrace::the_trace_ = NULL;
@@ -360,19 +361,23 @@ void MiniTrace::Shutdown() {
     }
   }
   if (the_trace != NULL) {
+    // kill IdleCheck
+    if (the_trace->log_flag_ & kConnectAPE) {
+      CHECK_PTHREAD_CALL(pthread_kill, (the_trace->idlecheck_thread_, SIGQUIT),
+          "IdleCheck kill");
+      close(the_trace->ape_socket_fd_);
+    }
+    if (the_trace->log_flag_ & kLogOneSecPing) {
+      CHECK_PTHREAD_CALL(pthread_kill, (the_trace->pinging_thread_, SIGQUIT),
+          "Pinging kill");
+    }
+
     // Wait for consumer
     LOG(INFO) << "MiniTrace: Shutdown() called";
     Thread *consumer_thread = NULL;
     ThreadList *runtime_thread_list = runtime->GetThreadList();
     if (the_trace->consumer_runs_ && the_trace->consumer_tid_ != 0)
       consumer_thread = runtime_thread_list->FindThreadByThreadId(the_trace->consumer_tid_);
-
-    // kill IdleCheck
-    if (the_trace->log_flag_ & kConnectAPE) {
-      CHECK_PTHREAD_CALL(pthread_kill, (the_trace->idlecheck_thread_, SIGQUIT),
-          "idle checker kill");
-      close(the_trace->ape_socket_fd_);
-    }
 
     runtime_thread_list->SuspendAll();
     runtime->GetInstrumentation()->DisableMethodTracing();
@@ -626,6 +631,8 @@ void *MiniTrace::IdleCheckTask(void *arg) {
       }
     }
   }
+  LOG(INFO) << "MiniTrace IdleCheck worker " << ringbuf_worker;
+  CHECK(ringbuf_worker != NULL);
 
   /**
    * Wait for idle state of MainLooper
@@ -664,7 +671,7 @@ void *MiniTrace::IdleCheckTask(void *arg) {
 
   timeval now;
   uint64_t now_long;
-  char *buf = new char[10]();
+  char buf[10];
   Append2LE(buf, 0); // tid
   while (1) {
     ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
@@ -685,7 +692,6 @@ void *MiniTrace::IdleCheckTask(void *arg) {
     }
   }
 
-  delete buf;
   runtime->DetachCurrentThread();
   return NULL;
 }
@@ -712,8 +718,9 @@ void *MiniTrace::PingingTask(void *arg) {
       }
     }
   }
+  CHECK(ringbuf_worker != NULL);
 
-  char *buf = new char[10]();
+  char buf[10];
   Append2LE(buf, 1); // tid = 1
 
   timeval now;
@@ -726,7 +733,6 @@ void *MiniTrace::PingingTask(void *arg) {
 
     usleep(1000000); // 1 second
   }
-  delete buf;
   runtime->DetachCurrentThread();
 
   return NULL;
@@ -792,7 +798,7 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
     LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodEntered);
 
   // Assume the first called next() is called with MessageQueue from main thread
-  if (UNLIKELY(main_msgq_ == NULL)) {
+  if (UNLIKELY(method_msgq_next_ == method && main_msgq_ == NULL)) {
     main_msgq_ = this_object;
   }
 }
@@ -935,15 +941,16 @@ void MiniTrace::LogFieldTraceEvent(Thread* thread, mirror::Object *this_object, 
   ringbuf_worker_t *ringbuf_worker = GetRingBufWorker();
   if (ringbuf_worker == NULL)
     return;
-  LogNewField(field);
+  uint16_t fieldDetailIdx = LogNewField(field);
 
-  char buf[14];
+  char buf[16];
   Append2LE(buf, thread->GetTid());
   Append4LE(buf + 2, PointerToLowMemUInt32(field) | action);
   Append4LE(buf + 6, PointerToLowMemUInt32(this_object));
   Append4LE(buf + 10, dex_pc);
+  Append2LE(buf + 14, fieldDetailIdx);
 
-  WriteRingBuffer(ringbuf_worker, buf, 14);
+  WriteRingBuffer(ringbuf_worker, buf, 16);
 }
 
 void MiniTrace::StoreExitingThreadInfo(Thread* thread) {
@@ -967,8 +974,8 @@ void MiniTrace::DumpField(std::string &string) {
   Thread *self = Thread::Current();
   traced_field_lock_->AssertHeld(self);
   string.assign("");
-  for (auto& it: fields_not_stored_) {
-    (&it)->Dump(string);
+  for (auto it: fields_not_stored_) {
+    (*it).Dump(string);
   }
   fields_not_stored_.clear();
 }
@@ -990,11 +997,21 @@ void MiniTrace::LogNewMethod(mirror::ArtMethod *method) {
     methods_not_stored_.emplace_back(method);
 }
 
-void MiniTrace::LogNewField(mirror::ArtField *field) {
-  MutexLock mu(Thread::Current(), *traced_field_lock_);
-  auto it = visited_fields_.insert(field);
-  if (it.second)
-    fields_not_stored_.emplace_back(field);
+uint16_t MiniTrace::LogNewField(mirror::ArtField *field) {
+  Thread *self = Thread::Current();
+  MutexLock mu(self, *traced_field_lock_);
+  auto it = visited_fields_.emplace(field);
+  // std::set<ArtFieldDetail>::iterator it2 = it.first;
+  // ArtFieldDetail fieldDetail = *it2;
+  // std::set<ArtFieldDetail>::iterator it2 = it.first;
+  const ArtFieldDetail *fieldDetail = &(*(it.first));
+  if (it.second) {
+    fields_not_stored_.push_back(fieldDetail);
+    return 0;
+  } else {
+    // ArtFieldDetail fieldDetail = *(it.first);
+    return fieldDetail->FindIdx(field);
+  }
 }
 
 bool* MiniTrace::GetExecutionData(Thread* self, mirror::ArtMethod* method) {

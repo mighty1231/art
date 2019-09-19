@@ -160,8 +160,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       else
         declaringClassSourceFile_.assign(method->GetDeclaringClassSourceFile());
     }
-    bool operator< (const ArtMethodDetail *other) const {
-      return this->method_ < other->method_;
+    bool operator< (const ArtMethodDetail & other) const {
+      return this->method_ < other.method_;
     }
     void Dump(std::string &string) {
       string.append(StringPrintf("%p\t%s\t%s\t%s\t%s\n", method_,
@@ -182,23 +182,58 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   class ArtFieldDetail {
   public:
     ArtFieldDetail(mirror::ArtField *field) : field_(field),
-        name_(field->GetName()), typeDesc_(field->GetTypeDescriptor()) {
+        typeDesc_(field->GetTypeDescriptor()), next_(NULL) {
+      Thread *self = Thread::Current();
+      Locks::mutator_lock_->SharedLock(self);
+      name_.assign(field->GetName());
+      Locks::mutator_lock_->SharedUnlock(self);
       const DexFile* dex_file = field->GetDexFile();
       const DexFile::FieldId& field_id = dex_file->GetFieldId(field->GetDexFieldIndex());
       classDescriptor_.assign(PrettyDescriptor(dex_file->GetFieldDeclaringClassDescriptor(field_id)));
     }
-    bool operator< (const ArtFieldDetail *other) const {
-      return this->field_ < other->field_;
+    bool operator< (const ArtFieldDetail & other) const {
+      return this->field_ < other.field_;
     }
-    void Dump(std::string &string) {
-      string.append(StringPrintf("%p\t%s\t%s\t%s\n", field_,
-        classDescriptor_.c_str(), name_.c_str(), typeDesc_.c_str()));
+    void Dump(std::string &string) const {
+      uint16_t idx = 0;
+      const ArtFieldDetail *cur = this;
+      while (cur != NULL) {
+        string.append(StringPrintf("%p\t%d\t%s\t%s\t%s\n", field_, idx,
+          cur->classDescriptor_.c_str(), cur->name_.c_str(), cur->typeDesc_.c_str()));
+        ++idx;
+        cur = cur->next_;
+      }
+    }
+    /**
+     * Problem: pointer value is same but actually different
+     * use field->GetName */
+    uint16_t FindIdx(mirror::ArtField *field) const {
+      Thread *self = Thread::Current();
+      Locks::mutator_lock_->SharedLock(self);
+      std::string new_name = field->GetName();
+      Locks::mutator_lock_->SharedUnlock(self);
+      const ArtFieldDetail *cur = NULL;
+      const ArtFieldDetail *next = this;
+      uint16_t idx = 0;
+      while (next != NULL) {
+        cur = next;
+        if (new_name.compare(cur->name_) == 0) {
+          return idx;
+        }
+        ++idx;
+        next = cur->next_;
+      }
+
+      // New field
+      cur->next_ = new ArtFieldDetail(field);
+      return idx;
     }
   private:
     mirror::ArtField* field_;
     std::string classDescriptor_;
     std::string name_;
     std::string typeDesc_;
+    mutable ArtFieldDetail *next_;
   };
 
   class ThreadDetail {
@@ -241,7 +276,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   void DumpThread(std::string &buffer);
 
   void LogNewMethod(mirror::ArtMethod *method);
-  void LogNewField(mirror::ArtField *field);
+  uint16_t LogNewField(mirror::ArtField *field);
   void LogNewThread(Thread *thread);
 
   void ReadBuffer(char *dest, size_t offset, size_t len);
@@ -295,10 +330,10 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   std::set<mirror::ArtMethod*> visited_methods_;
 
   // Buffer to store trace field data.
-  std::list<ArtFieldDetail> fields_not_stored_;
+  std::list<const ArtFieldDetail *> fields_not_stored_;
 
   // Visited fields
-  std::set<mirror::ArtField*> visited_fields_;
+  std::set<ArtFieldDetail> visited_fields_;
 
   // Buffer to store thread data
   // Stored threads are accessible with registered_threads_
