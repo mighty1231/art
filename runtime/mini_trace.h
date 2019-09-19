@@ -74,6 +74,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     /* Flags used for communicate with ape */
     kConnectAPE          = 0x00010000, // If set, communicates with APE
 
+    /* Ping flag */
+    kLogOneSecPing       = 0x00020000, // If set, push simple log for every 1 second
+
     /* Flags used for filtering objects */
     kLogFieldTypeFlags   = 0x0F000000,
     kLogFieldType0       = 0x01000000, // All the other fields
@@ -85,7 +88,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     kLogMethodType1      = 0x20000000, // Non-basic API methods
     kLogMethodType2      = 0x40000000, // UNUSED
     kLogMethodType3      = 0x80000000, // methods defined on app
-    kFlagAll             = 0xFF0101FF
+    kFlagAll             = 0xFF0301FF
   };
 
   static void Start()
@@ -136,8 +139,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   static void StoreExitingThreadInfo(Thread* thread);
 
-  static void *ConsumerFunction(void *mt_object) LOCKS_EXCLUDED(Locks::trace_lock_);
-  static void *IdleChecker(void *mt_object);
+  static void *ConsumerTask(void *mt_object) LOCKS_EXCLUDED(Locks::trace_lock_);
+  static void *IdleCheckTask(void *mt_object);
+  static void *PingingTask(void *mt_object);
 
   class ArtMethodDetail {
   public:
@@ -326,7 +330,10 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   volatile bool msg_taken_;
 
   int ape_socket_fd_;
-  pthread_t idlechecker_thread_;
+  pthread_t idlecheck_thread_;
+
+  // Push simple log for every 1 second
+  pthread_t pinging_thread_;
 
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
 };

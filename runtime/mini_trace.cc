@@ -81,8 +81,13 @@ namespace art {
  *   int32_t dump_length_with_action;
  *   char dumped[];
  *
+ *
  * Idle event - length 10 (no action, differentiate this with tid=0)
  *   int16_t tid=0;
+ *   uint64_t timestamp_in_ms;
+ *
+ * Pinging event - length 10 (no action, differentiate this with tid=0)
+ *   int16_t tid=1;
  *   uint64_t timestamp_in_ms;
  */
 enum MiniTraceAction {
@@ -95,7 +100,6 @@ enum MiniTraceAction {
     kMiniTraceMessageEvent = 0x06,      // message
     kMiniTraceActionMask = 0x07,        // three bits
 };
-
 
 static const uint16_t kMiniTraceHeaderLength     = 4+2+2+8+4;
 static const uint16_t kMiniTraceVersion          = 1;
@@ -237,7 +241,7 @@ static int CreateSocketAndCheckAPE() {
   int socket_fd;
   sockaddr_un server_addr;
   if ((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
-    PLOG(ERROR) << "MiniTrace::IdleChecker: socket " << errno;
+    PLOG(ERROR) << "MiniTrace::IdleCheck: socket " << errno;
     return -1;
   }
 
@@ -247,11 +251,11 @@ static int CreateSocketAndCheckAPE() {
   int addrlen = sizeof server_addr.sun_family + strlen(&server_addr.sun_path[1]) + 1;
 
   if (connect(socket_fd, (sockaddr *)&server_addr, addrlen) < 0) {
-    PLOG(ERROR) << "MiniTrace::IdleChecker: connect " << errno;
+    PLOG(ERROR) << "MiniTrace::IdleCheck: connect " << errno;
     close(socket_fd);
     return -1;
   }
-  LOG(INFO) << "MiniTrace::IdleChecker: connect success!";
+  LOG(INFO) << "MiniTrace::IdleCheck: connect success!";
   return socket_fd;
 }
 
@@ -321,110 +325,24 @@ void MiniTrace::Start() {
   }
   Runtime* runtime = Runtime::Current();
   runtime->GetThreadList()->SuspendAll();
-  CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerFunction,
+  CHECK_PTHREAD_CALL(pthread_create, (&the_trace->consumer_thread_, NULL, &ConsumerTask,
                                       the_trace),
                                       "Consumer thread");
   if (log_flag & kConnectAPE) {
-    CHECK_PTHREAD_CALL(pthread_create, (&the_trace->idlechecker_thread_, NULL, &IdleChecker,
+    CHECK_PTHREAD_CALL(pthread_create, (&the_trace->idlecheck_thread_, NULL, &IdleCheckTask,
                                         the_trace),
-                                        "IdleChecker thread");
+                                        "IdleCheck thread");
+  }
+  if (log_flag & kLogOneSecPing) {
+    CHECK_PTHREAD_CALL(pthread_create, (&the_trace->pinging_thread_, NULL, &PingingTask,
+                                        the_trace),
+                                        "Pinging thread");
   }
   if (log_flag & (kLogMessage | kConnectAPE))
     log_flag |= (kDoMethodEntered | kDoMethodExited);
   runtime->GetInstrumentation()->AddListener(the_trace, log_flag & kInstListener);
   runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
-}
-
-void *MiniTrace::IdleChecker(void *arg) {
-  MiniTrace *the_trace = (MiniTrace *)arg;
-  Runtime* runtime = Runtime::Current();
-  CHECK(runtime->AttachCurrentThread("IdleChecker", true, runtime->GetSystemThreadGroup(),
-                                       !runtime->IsCompiler()));
-
-  Thread *self = Thread::Current();
-  JNIEnvExt *env = self->GetJniEnv();
-  LOG(INFO) << "MiniTrace IdleChecker tid " << self->GetTid();
-
-  while (the_trace->msg_taken_ == false) {
-    usleep(500000); // 0.5 second
-  }
-
-  // Don't log for this thread,
-  // just get ringbuf worker and log idle time
-  ringbuf_worker_t *ringbuf_worker = NULL;
-  {
-    MutexLock mu(self, *the_trace->wids_registered_lock_);
-    for (size_t i=0; i<MAX_THREAD_COUNT; i++) {
-      if (the_trace->wids_registered_[i] == false) {
-        ringbuf_worker = ringbuf_register(the_trace->ringbuf_, i);
-        the_trace->wids_registered_[i] = true;
-        break;
-      }
-    }
-  }
-
-  /**
-   * Wait for idle state of MainLooper
-   * Technique borrowed from Instrumentation$waitForIdleSync
-   * Implemented following JAVA code
-   * $ mainLooper = Looper.getMainLooper();
-   * $ mainQueue = mainlooper.getQueue();
-   * $ mainHandler = new Handler(mainLooper);
-   */
-  ScopedLocalRef<jclass> looperClass(env, env->FindClass("android/os/Looper"));
-  ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
-  ScopedLocalRef<jclass> handlerClass(env, env->FindClass("android/os/Handler"));
-  ScopedLocalRef<jclass> idlerClass(env, env->FindClass("android/app/Instrumentation$Idler"));
-  ScopedLocalRef<jclass> emptyRunnableClass(env, env->FindClass("android/app/Instrumentation$EmptyRunnable"));
-
-  jmethodID getMainLooper = env->GetStaticMethodID(looperClass.get(),
-      "getMainLooper", "()Landroid/os/Looper;");
-  jmethodID getQueue = env->GetMethodID(looperClass.get(),
-      "getQueue", "()Landroid/os/MessageQueue;");
-  jmethodID addIdleHandler = env->GetMethodID(queueClass.get(),
-      "addIdleHandler", "(Landroid/os/MessageQueue$IdleHandler;)V");
-  jmethodID handlerInit = env->GetMethodID(handlerClass.get(),
-      "<init>", "(Landroid/os/Looper;)V");
-  jmethodID post = env->GetMethodID(handlerClass.get(),
-      "post", "(Ljava/lang/Runnable;)Z");
-  jmethodID idlerInit = env->GetMethodID(idlerClass.get(),
-      "<init>", "(Ljava/lang/Runnable;)V");
-  jmethodID waitForIdle = env->GetMethodID(idlerClass.get(),
-      "waitForIdle", "()V");
-  jmethodID runnableInit = env->GetMethodID(emptyRunnableClass.get(),
-      "<init>", "()V");
-
-  ScopedLocalRef<jobject> mainLooper(env, env->CallStaticObjectMethod(looperClass.get(), getMainLooper));
-  ScopedLocalRef<jobject> mainQueue(env, env->CallObjectMethod(mainLooper.get(), getQueue));
-  ScopedLocalRef<jobject> mainHandler(env, env->NewObject(handlerClass.get(), handlerInit, mainLooper.get()));
-
-  timeval now;
-  uint64_t now_long;
-  char *buf = new char[10]();
-  Append2LE(buf, 0); // tid
-  while (1) {
-    ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
-    ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
-    env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
-    env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
-    env->CallVoidMethod(idler.get(), waitForIdle);
-    the_trace->msg_taken_ = false;
-    gettimeofday(&now, NULL);
-    now_long = now.tv_sec * 1000LL + now.tv_usec / 1000;
-
-    // write all idle state
-    Append8LE(buf + 2, now_long);
-    the_trace->WriteRingBuffer(ringbuf_worker, buf, 10);
-    write(the_trace->ape_socket_fd_, &now_long, sizeof (uint64_t));
-    while (the_trace->msg_taken_ == false) {
-      usleep(500000);
-    }
-  }
-
-  delete buf;
-  runtime->DetachCurrentThread();
-  return NULL;
 }
 
 void MiniTrace::Shutdown() {
@@ -449,9 +367,9 @@ void MiniTrace::Shutdown() {
     if (the_trace->consumer_runs_ && the_trace->consumer_tid_ != 0)
       consumer_thread = runtime_thread_list->FindThreadByThreadId(the_trace->consumer_tid_);
 
-    // kill IdleChecker
+    // kill IdleCheck
     if (the_trace->log_flag_ & kConnectAPE) {
-      CHECK_PTHREAD_CALL(pthread_kill, (the_trace->idlechecker_thread_, SIGQUIT),
+      CHECK_PTHREAD_CALL(pthread_kill, (the_trace->idlecheck_thread_, SIGQUIT),
           "idle checker kill");
       close(the_trace->ape_socket_fd_);
     }
@@ -497,7 +415,7 @@ void MiniTrace::Checkout() {
   }
 }
 
-void *MiniTrace::ConsumerFunction(void *arg) {
+void *MiniTrace::ConsumerTask(void *arg) {
   MiniTrace *the_trace = (MiniTrace *)arg;
   Runtime* runtime = Runtime::Current();
   CHECK(runtime->AttachCurrentThread("Consumer", true, runtime->GetSystemThreadGroup(),
@@ -681,6 +599,139 @@ void *MiniTrace::ConsumerFunction(void *arg) {
   return NULL;
 }
 
+void *MiniTrace::IdleCheckTask(void *arg) {
+  MiniTrace *the_trace = (MiniTrace *)arg;
+  Runtime* runtime = Runtime::Current();
+  CHECK(runtime->AttachCurrentThread("IdleCheck", true, runtime->GetSystemThreadGroup(),
+                                       !runtime->IsCompiler()));
+
+  Thread *self = Thread::Current();
+  JNIEnvExt *env = self->GetJniEnv();
+  LOG(INFO) << "MiniTrace IdleCheck tid " << self->GetTid();
+
+  while (the_trace->msg_taken_ == false) {
+    usleep(500000); // 0.5 second
+  }
+
+  // Don't log for this thread,
+  // just get ringbuf worker and log idle time
+  ringbuf_worker_t *ringbuf_worker = NULL;
+  {
+    MutexLock mu(self, *the_trace->wids_registered_lock_);
+    for (size_t i=0; i<MAX_THREAD_COUNT; i++) {
+      if (the_trace->wids_registered_[i] == false) {
+        ringbuf_worker = ringbuf_register(the_trace->ringbuf_, i);
+        the_trace->wids_registered_[i] = true;
+        break;
+      }
+    }
+  }
+
+  /**
+   * Wait for idle state of MainLooper
+   * Technique borrowed from Instrumentation$waitForIdleSync
+   * Implemented following JAVA code
+   * $ mainLooper = Looper.getMainLooper();
+   * $ mainQueue = mainlooper.getQueue();
+   * $ mainHandler = new Handler(mainLooper);
+   */
+  ScopedLocalRef<jclass> looperClass(env, env->FindClass("android/os/Looper"));
+  ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
+  ScopedLocalRef<jclass> handlerClass(env, env->FindClass("android/os/Handler"));
+  ScopedLocalRef<jclass> idlerClass(env, env->FindClass("android/app/Instrumentation$Idler"));
+  ScopedLocalRef<jclass> emptyRunnableClass(env, env->FindClass("android/app/Instrumentation$EmptyRunnable"));
+
+  jmethodID getMainLooper = env->GetStaticMethodID(looperClass.get(),
+      "getMainLooper", "()Landroid/os/Looper;");
+  jmethodID getQueue = env->GetMethodID(looperClass.get(),
+      "getQueue", "()Landroid/os/MessageQueue;");
+  jmethodID addIdleHandler = env->GetMethodID(queueClass.get(),
+      "addIdleHandler", "(Landroid/os/MessageQueue$IdleHandler;)V");
+  jmethodID handlerInit = env->GetMethodID(handlerClass.get(),
+      "<init>", "(Landroid/os/Looper;)V");
+  jmethodID post = env->GetMethodID(handlerClass.get(),
+      "post", "(Ljava/lang/Runnable;)Z");
+  jmethodID idlerInit = env->GetMethodID(idlerClass.get(),
+      "<init>", "(Ljava/lang/Runnable;)V");
+  jmethodID waitForIdle = env->GetMethodID(idlerClass.get(),
+      "waitForIdle", "()V");
+  jmethodID runnableInit = env->GetMethodID(emptyRunnableClass.get(),
+      "<init>", "()V");
+
+  ScopedLocalRef<jobject> mainLooper(env, env->CallStaticObjectMethod(looperClass.get(), getMainLooper));
+  ScopedLocalRef<jobject> mainQueue(env, env->CallObjectMethod(mainLooper.get(), getQueue));
+  ScopedLocalRef<jobject> mainHandler(env, env->NewObject(handlerClass.get(), handlerInit, mainLooper.get()));
+
+  timeval now;
+  uint64_t now_long;
+  char *buf = new char[10]();
+  Append2LE(buf, 0); // tid
+  while (1) {
+    ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
+    ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
+    env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
+    env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
+    env->CallVoidMethod(idler.get(), waitForIdle);
+    the_trace->msg_taken_ = false;
+    gettimeofday(&now, NULL);
+    now_long = now.tv_sec * 1000LL + now.tv_usec / 1000;
+
+    // write all idle state
+    Append8LE(buf + 2, now_long);
+    the_trace->WriteRingBuffer(ringbuf_worker, buf, 10);
+    write(the_trace->ape_socket_fd_, &now_long, sizeof (uint64_t));
+    while (the_trace->msg_taken_ == false) {
+      usleep(500000);
+    }
+  }
+
+  delete buf;
+  runtime->DetachCurrentThread();
+  return NULL;
+}
+
+void *MiniTrace::PingingTask(void *arg) {
+  MiniTrace *the_trace = (MiniTrace *)arg;
+  Runtime* runtime = Runtime::Current();
+  CHECK(runtime->AttachCurrentThread("Pinging", true, runtime->GetSystemThreadGroup(),
+                                       !runtime->IsCompiler()));
+
+  Thread *self = Thread::Current();
+  LOG(INFO) << "MiniTrace: Pinging thread attached with tid " << self->GetTid();
+
+  // Don't log for this thread,
+  // just get ringbuf worker and log idle time
+  ringbuf_worker_t *ringbuf_worker = NULL;
+  {
+    MutexLock mu(self, *the_trace->wids_registered_lock_);
+    for (size_t i=0; i<MAX_THREAD_COUNT; i++) {
+      if (the_trace->wids_registered_[i] == false) {
+        ringbuf_worker = ringbuf_register(the_trace->ringbuf_, i);
+        the_trace->wids_registered_[i] = true;
+        break;
+      }
+    }
+  }
+
+  char *buf = new char[10]();
+  Append2LE(buf, 1); // tid = 1
+
+  timeval now;
+  uint64_t timestamp;
+  while (true) {
+    gettimeofday(&now, NULL);
+    timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
+    Append8LE(buf + 2, timestamp);
+    the_trace->WriteRingBuffer(ringbuf_worker, buf, 10);
+
+    usleep(1000000); // 1 second
+  }
+  delete buf;
+  runtime->DetachCurrentThread();
+
+  return NULL;
+}
+
 MiniTrace::MiniTrace(int socket_fd, const char *prefix,
         uint32_t log_flag, uint32_t buffer_size, int ape_socket_fd)
     : socket_fd_(socket_fd), data_bin_index_(0),
@@ -693,7 +744,7 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")),
       main_msgq_(NULL), msg_taken_(false),
-      ape_socket_fd_(ape_socket_fd), idlechecker_thread_(0) {
+      ape_socket_fd_(ape_socket_fd), idlecheck_thread_(0), pinging_thread_(0) {
 
   // Set prefix
   strcpy(prefix_, prefix);
@@ -712,9 +763,6 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
   env_ = Thread::Current()->GetJniEnv();
 
   ScopedObjectAccess soa(env_);
-
-  // is it possible to find class?
-  // Landroid/app/ActivityThread;, handleResumeActivity, (Landroid/os/IBinder;ZZZ)V
   ScopedLocalRef<jclass> queueClass(env_, env_->FindClass("android/os/MessageQueue"));
   jmethodID next = env_->GetMethodID(queueClass.get(), "next", "()Landroid/os/Message;");
   method_msgq_next_ = soa.DecodeMethod(next);
@@ -1077,7 +1125,9 @@ ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
   MiniTraceThreadFlag flag = self->GetMiniTraceFlag();
   if (flag == kMiniTraceFirstSeen) {
     pthread_t pself = pthread_self();
-    if (pself == consumer_thread_ || (idlechecker_thread_ != 0 && pself == idlechecker_thread_)) {
+    if (pself == consumer_thread_
+        || (idlecheck_thread_ != 0 && pself == idlecheck_thread_)
+        || (pinging_thread_ != 0 && pself == pinging_thread_)) {
       self->SetMiniTraceFlag(kMiniTraceExclude);
       return NULL;
     }
