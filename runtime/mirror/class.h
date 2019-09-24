@@ -288,6 +288,14 @@ class MANAGED Class FINAL : public Object {
     return (GetAccessFlags<kVerifyFlags>() & kAccClassIsPhantomReference) != 0;
   }
 
+  uint32_t IsCheckedByMiniTrace() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return GetAccessFlags() & kAccMiniTraceChecked;
+  }
+
+  void SetCheckedByMiniTrace() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SetAccessFlags((GetAccessFlags() | kAccMiniTraceChecked));
+  }
+
   // Can references of this type be assigned to by things of another type? For non-array types
   // this is a matter of whether sub-classes may exist - which they can't if the type is final.
   // For array classes, where all the classes are final due to there being no sub-classes, an

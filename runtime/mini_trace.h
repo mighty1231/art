@@ -86,7 +86,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     kLogMethodTypeFlags  = 0xF0000000,
     kLogMethodType0      = 0x10000000, // Basic API methods
     kLogMethodType1      = 0x20000000, // Non-basic API methods
-    kLogMethodType2      = 0x40000000, // UNUSED
+    kLogMethodType2      = 0x40000000, // IdleHandler$queueIdle
     kLogMethodType3      = 0x80000000, // methods defined on app
     kFlagAll             = 0xFF0301FF
   };
@@ -108,7 +108,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
       LOCKS_EXCLUDED(Locks::trace_lock_);
 
-  static void PostClassPrepare(mirror::Class* klass)
+  static void PostClassPrepare(mirror::Class* klass, const char *descriptor)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // InstrumentationListener implementation.
@@ -282,6 +282,11 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   void ReadBuffer(char *dest, size_t offset, size_t len);
   void WriteRingBuffer(ringbuf_worker_t *worker, const char *src, size_t len);
 
+  static void new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass clazz,
+        jlong ptr, jint timeoutMillis);
+  static void *nativePollOnce_originalEntry;
+  // static void (MiniTrace::*nativePollOnceEntry)(JNIEnv*, jclass, jlong, jint);
+
   // Singleton instance of the Trace or NULL when no method tracing is active.
   static MiniTrace* volatile the_trace_ GUARDED_BY(Locks::trace_lock_);
 
@@ -359,13 +364,21 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   Mutex *traced_thread_lock_;
 
+  /* Used for logging messages / idlecheck task */
+  Thread *main_thread_;
   JNIEnvExt *env_;
   mirror::ArtMethod *method_msgq_next_;
+  mirror::ArtMethod *method_msgq_enqueueMessage_;
   mirror::Object *main_msgq_;
   volatile bool msg_taken_;
 
+  /* Used for Idlechecker */
   int ape_socket_fd_;
+  mirror::Object *idlecheck_idler_;
+  mirror::Object *idlecheck_emptyRunnable_;
   pthread_t idlecheck_thread_;
+  int32_t queueIdle_level_;
+  int32_t msg_enqueued_cnt_;
 
   // Push simple log for every 1 second
   pthread_t pinging_thread_;

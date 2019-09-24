@@ -59,6 +59,9 @@ static constexpr uint32_t kAccMiniTraceType3            = 0x30000000;
 static constexpr uint32_t kAccMiniTraceTypeFlag         = 0x30000000;
 static constexpr uint32_t kAccMiniTraceTypeShift        = 28;
 
+// class that minitrace processed
+static constexpr uint32_t kAccMiniTraceChecked          = 0x10000000;
+
 // class/ancestor overrides finalize()
 static constexpr uint32_t kAccClassIsFinalizable        = 0x80000000;
 // class is a soft/weak/phantom ref

@@ -43,6 +43,8 @@
 #include <sys/un.h>
 #include <endian.h>
 #include "ringbuf.h"
+#include "dex_instruction.h"
+#include <utils/Timers.h>
 
 namespace art {
 
@@ -105,6 +107,7 @@ enum MiniTraceAction {
 static const uint16_t kMiniTraceHeaderLength     = 4+2+2+4+8;
 static const uint16_t kMiniTraceVersion          = 2;
 static const uint32_t kMiniTraceMagic            = 0x7254694D; // MiTr
+void *MiniTrace::nativePollOnce_originalEntry = NULL;
 
 MiniTrace* volatile MiniTrace::the_trace_ = NULL;
 const char *MiniTrace::threadnames_to_exclude[] = {
@@ -193,7 +196,8 @@ static int CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid, uint32_t *log_
   int addrlen = sizeof server_addr.sun_family + strlen(&server_addr.sun_path[1]) + 1;
 
   if (connect(socket_fd, (sockaddr *)&server_addr, addrlen) < 0) {
-    PLOG(ERROR) << "MiniTrace: connect " << errno;
+    if (errno != 111)
+      PLOG(ERROR) << "MiniTrace: connect " << errno;
     close(socket_fd);
     return -1;
   }
@@ -314,9 +318,9 @@ void MiniTrace::Start() {
       || (log_flag & kLogFieldTypeFlags));
 
     // Currently UNUSED flags
-    CHECK(!(log_flag & kLogFieldType1));
-    CHECK(!(log_flag & kLogFieldType2));
-    CHECK(!(log_flag & kLogMethodType2));
+    // CHECK(!(log_flag & kLogFieldType1));
+    // CHECK(!(log_flag & kLogFieldType2));
+    // CHECK(!(log_flag & kLogMethodType2));
     int ape_socket_fd = -1;
     if (log_flag & kConnectAPE) {
       ape_socket_fd = CreateSocketAndCheckAPE();
@@ -641,6 +645,8 @@ void *MiniTrace::IdleCheckTask(void *arg) {
    * $ mainLooper = Looper.getMainLooper();
    * $ mainQueue = mainlooper.getQueue();
    * $ mainHandler = new Handler(mainLooper);
+   * $ Idler ider = new Idler(null);
+   * $ Runnable emptyRunnable = new EmptyRunnable();
    */
   ScopedLocalRef<jclass> looperClass(env, env->FindClass("android/os/Looper"));
   ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
@@ -669,16 +675,29 @@ void *MiniTrace::IdleCheckTask(void *arg) {
   ScopedLocalRef<jobject> mainQueue(env, env->CallObjectMethod(mainLooper.get(), getQueue));
   ScopedLocalRef<jobject> mainHandler(env, env->NewObject(handlerClass.get(), handlerInit, mainLooper.get()));
 
+  /* Objects, idler and emptyRunnable, are used in main thread */
+  jobject idler = env->NewGlobalRef(env->NewObject(idlerClass.get(), idlerInit, 0));
+  jobject emptyRunnable = env->NewGlobalRef(env->NewObject(emptyRunnableClass.get(), runnableInit));
+  Locks::mutator_lock_->SharedLock(self);
+  the_trace->idlecheck_idler_ = self->DecodeJObject(idler);
+  the_trace->idlecheck_emptyRunnable_ = self->DecodeJObject(emptyRunnable);
+  Locks::mutator_lock_->SharedUnlock(self);
+
   timeval now;
   uint64_t now_long;
   char buf[10];
   Append2LE(buf, 0); // tid
+
   while (1) {
-    ScopedLocalRef<jobject> idler(env, env->NewObject(idlerClass.get(), idlerInit, 0));
-    ScopedLocalRef<jobject> emptyRunnable(env, env->NewObject(emptyRunnableClass.get(), runnableInit));
-    env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler.get());
-    env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable.get());
-    env->CallVoidMethod(idler.get(), waitForIdle);
+    /**
+     * Implemented following JAVA code
+     * $ mainQueue.addIdleHandler(idler);
+     * $ mainHandler.post(emptyRunnable);
+     * $ idler.waitForIdle();
+     */
+    env->CallVoidMethod(mainQueue.get(), addIdleHandler, idler);
+    env->CallBooleanMethod(mainHandler.get(), post, emptyRunnable);
+    env->CallVoidMethod(idler, waitForIdle);
     the_trace->msg_taken_ = false;
     gettimeofday(&now, NULL);
     now_long = now.tv_sec * 1000LL + now.tv_usec / 1000;
@@ -738,6 +757,15 @@ void *MiniTrace::PingingTask(void *arg) {
   return NULL;
 }
 
+void MiniTrace::new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass clazz,
+        jlong ptr, jint timeoutMillis) {
+  typedef void (fntype)(JNIEnv*, jclass, jlong, jint);
+  LOG(INFO) << "MiniTrace: nativePollOnce";
+  fntype* const fn = reinterpret_cast<fntype*>(MiniTrace::nativePollOnce_originalEntry);
+  fn(env, clazz, ptr, timeoutMillis);
+  LOG(INFO) << "MiniTrace: nativePollOnce exit...";
+}
+
 MiniTrace::MiniTrace(int socket_fd, const char *prefix,
         uint32_t log_flag, uint32_t buffer_size, int ape_socket_fd)
     : socket_fd_(socket_fd), data_bin_index_(0),
@@ -750,7 +778,8 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")),
       main_msgq_(NULL), msg_taken_(false),
-      ape_socket_fd_(ape_socket_fd), idlecheck_thread_(0), pinging_thread_(0) {
+      ape_socket_fd_(ape_socket_fd), idlecheck_idler_(0), idlecheck_emptyRunnable_(0),
+      idlecheck_thread_(0), queueIdle_level_(0), pinging_thread_(0) {
 
   // Set prefix
   strcpy(prefix_, prefix);
@@ -766,12 +795,23 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
     wids_registered_[i] = false;
   }
 
-  env_ = Thread::Current()->GetJniEnv();
+  main_thread_ = Thread::Current();
+  env_ = main_thread_->GetJniEnv();
 
   ScopedObjectAccess soa(env_);
   ScopedLocalRef<jclass> queueClass(env_, env_->FindClass("android/os/MessageQueue"));
   jmethodID next = env_->GetMethodID(queueClass.get(), "next", "()Landroid/os/Message;");
   method_msgq_next_ = soa.DecodeMethod(next);
+  jmethodID enqueueMessage = env_->GetMethodID(queueClass.get(), "enqueueMessage", "(Landroid/os/Message;J)Z");
+  method_msgq_enqueueMessage_ = soa.DecodeMethod(enqueueMessage);
+
+
+  // ScopedFastNativeObjectAccess soa_n(env_);
+  mirror::Class* mirror_queueClass = soa.Decode<mirror::Class*>(queueClass.get());
+  mirror::ArtMethod *method_nativePollOnce = mirror_queueClass->FindDirectMethod("nativePollOnce", "(JI)V");
+
+  nativePollOnce_originalEntry = method_nativePollOnce->GetEntryPointFromJni();
+  method_nativePollOnce->SetEntryPointFromJni((void* )&new_android_os_MessageQueue_nativePollOnce);
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
@@ -801,6 +841,49 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
   if (UNLIKELY(method_msgq_next_ == method && main_msgq_ == NULL)) {
     main_msgq_ = this_object;
   }
+
+  if (UNLIKELY(main_msgq_ == this_object
+               && (log_flag_ & kConnectAPE)
+               && method == method_msgq_enqueueMessage_
+               && queueIdle_level_ > 0)) {
+    {
+      MiniTraceThreadFlag orig_flag = thread->GetMiniTraceFlag();
+      thread->SetMiniTraceFlag(kMiniTraceExclude);
+
+      // enqueueMessage uses elapsed time after booting
+      // $ long uptimeMillis = SystemClock.uptimeMillis();
+      // It returns different value with System.currentTimeMillis();
+      int uptimeMillis = systemTime(SYSTEM_TIME_MONOTONIC) / 1000000;
+
+      /**
+       * Fetch 2nd argument of enqueueMessage "when"
+       * enqueueMessage uses v9 as msg and v10 as when
+       * Analyzed bytecode of enqueueMessage with following code
+       *
+       * const DexFile::CodeItem* code_item = method_msgq_enqueueMessage_->GetCodeItem();
+       * const Instruction* inst;
+       * for (int i=0; i<300; i++) {
+       *   inst = Instruction::At(code_item->insns_ + dex_pc);
+       *   LOG(INFO) << "enqueueMessage" << i << ": " << inst->DumpString(method->GetDexFile());
+       *   dex_pc += inst->SizeInCodeUnits();
+       * }
+       */
+      int64_t when = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegLong(10);
+      if (when < uptimeMillis + 50) {
+        // The message is going to be handled soon
+        // Then wait new idlehandler
+        msg_enqueued_cnt_++;
+      }
+      thread->SetMiniTraceFlag(orig_flag);
+    }
+  }
+
+  if (log_flag_ & kConnectAPE) {
+    /* Check every queueIdle */
+    if (UNLIKELY(thread == main_thread_ && method->GetMiniTraceType() == 2)) {
+      queueIdle_level_++;
+    }
+  }
 }
 
 void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
@@ -817,6 +900,19 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
   if (log_flag_ & kConnectAPE) {
     if (UNLIKELY(method_msgq_next_ == method && main_msgq_ == this_object)) {
       msg_taken_ = true;
+    }
+
+    /* Check every queueIdle */
+    if (UNLIKELY(thread == main_thread_ && method->GetMiniTraceType() == 2)) {
+      queueIdle_level_--;
+
+      MiniTraceThreadFlag orig_flag = thread->GetMiniTraceFlag();
+      thread->SetMiniTraceFlag(kMiniTraceExclude);
+
+      // get remaining mIdleHandlers
+
+
+      thread->SetMiniTraceFlag(orig_flag);
     }
   }
 }
@@ -1057,7 +1153,12 @@ bool* MiniTrace::GetExecutionData(Thread* self, mirror::ArtMethod* method) {
   }
 }
 
-void MiniTrace::PostClassPrepare(mirror::Class* klass) {
+void MiniTrace::PostClassPrepare(mirror::Class* klass, const char *descriptor) {
+  static mirror::Class *idleHandlerClass = NULL;
+  if (idleHandlerClass == NULL && strcmp(descriptor, "Landroid/os/MessageQueue$IdleHandler;") == 0) {
+    idleHandlerClass = klass;
+  }
+
   if (klass->IsArrayClass() || klass->IsInterface() || klass->IsPrimitive()) {
     return;
   }
@@ -1067,8 +1168,6 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass) {
   if (apkDexFile == NULL && (dxFile.GetLocation().rfind("/data/app/", 0) == 0))
     apkDexFile = &dxFile;
   CHECK((apkDexFile == NULL) || (dxFile.GetLocation().rfind("/data/app/", 0) != 0) || apkDexFile == &dxFile);
-  std::string temp;
-  const char* descriptor = klass->GetDescriptor(&temp);
 
   // (strncmp(descriptor, "Ljava/", 6) == 0)
   //  || (strncmp(descriptor, "Ljavax/", 7) == 0)
@@ -1130,6 +1229,19 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass) {
       }
     }
     // Basic methods among API methods are type 0
+  }
+
+  // Mark queueIdle method of Landroid/os/MessageQueue$IdleHandler
+  int32_t iftable_count = klass->GetIfTableCount();
+  mirror::IfTable* iftable = klass->GetIfTable();
+  for (int32_t i = 0; i < iftable_count; ++i) {
+    mirror::Class *interface = iftable->GetInterface(i);
+    if (interface == idleHandlerClass) {
+      mirror::ArtMethod *method = klass->FindDeclaredVirtualMethod("queueIdle", "()Z");
+      CHECK(method != NULL);
+      method->SetMiniTraceType(2);
+      break;
+    }
   }
 }
 

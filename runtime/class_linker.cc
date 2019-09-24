@@ -2012,6 +2012,11 @@ mirror::Class* ClassLinker::EnsureResolved(Thread* self, const char* descriptor,
   // Return the loaded class.  No exceptions should be pending.
   CHECK(klass->IsResolved()) << PrettyClass(klass);
   self->AssertNoPendingException();
+
+  if (!klass->IsCheckedByMiniTrace()) {
+    MiniTrace::PostClassPrepare(klass, descriptor);
+    klass->SetCheckedByMiniTrace();
+  }
   return klass;
 }
 
@@ -2317,8 +2322,10 @@ mirror::Class* ClassLinker::DefineClass(Thread* self, const char* descriptor, si
    */
   Dbg::PostClassPrepare(new_class_h.Get());
 
-  MiniTrace::PostClassPrepare(new_class_h.Get());
-
+  if (!new_class_h.Get()->IsCheckedByMiniTrace()) {
+    MiniTrace::PostClassPrepare(new_class, descriptor);
+    new_class_h.Get()->SetCheckedByMiniTrace();
+  }
   return new_class_h.Get();
 }
 
