@@ -139,8 +139,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   static void StoreExitingThreadInfo(Thread* thread);
 
-  static void *ConsumerTask(void *mt_object) LOCKS_EXCLUDED(Locks::trace_lock_);
-  static void *IdleCheckTask(void *mt_object);
+  static void *ConsumerTask(void *mt_object);
   static void *PingingTask(void *mt_object);
 
   class ArtMethodDetail {
@@ -372,13 +371,16 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   mirror::Object *main_msgq_;
   volatile bool msg_taken_;
 
-  /* Used for Idlechecker */
+  /* Used for idle checking */
   int ape_socket_fd_;
-  mirror::Object *idlecheck_idler_;
-  mirror::Object *idlecheck_emptyRunnable_;
-  pthread_t idlecheck_thread_;
-  int32_t queueIdle_level_;
-  int32_t msg_enqueued_cnt_;
+  mirror::Object *m_idler_;
+  jobject j_idler_;
+  volatile bool poll_after_idle_;
+  volatile bool queueIdle_called_;
+  volatile int32_t msg_enqueued_cnt_;
+  jclass class_msgq_;
+  jobject main_MessageQueue_;
+  jmethodID method_addIdleHandler;
 
   // Push simple log for every 1 second
   pthread_t pinging_thread_;
