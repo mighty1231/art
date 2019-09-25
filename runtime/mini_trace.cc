@@ -318,9 +318,8 @@ void MiniTrace::Start() {
       || (log_flag & kLogFieldTypeFlags));
 
     // Currently UNUSED flags
-    // CHECK(!(log_flag & kLogFieldType1));
-    // CHECK(!(log_flag & kLogFieldType2));
-    // CHECK(!(log_flag & kLogMethodType2));
+    CHECK(!(log_flag & kLogFieldType1));
+    CHECK(!(log_flag & kLogFieldType2));
     int ape_socket_fd = -1;
     if (log_flag & kConnectAPE) {
       ape_socket_fd = CreateSocketAndCheckAPE();
@@ -689,6 +688,7 @@ void MiniTrace::new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass c
     self->SetMiniTraceFlag(orig_flag);
   }
   if (main_ptr == ptr) { // if main MessageQueue,
+    LOG(INFO) << "MiniTrace: nativePollOnce(timeoutMillis = " << timeoutMillis << ") - enter";
     if (the_trace->poll_after_idle_) {
       if (the_trace->msg_enqueued_cnt_ > 0) {
         // Wait another idle
@@ -711,7 +711,8 @@ void MiniTrace::new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass c
   fntype* const fn = reinterpret_cast<fntype*>(MiniTrace::nativePollOnce_originalEntry);
   fn(env, clazz, ptr, timeoutMillis);
   if (main_ptr == ptr) {
-    the_trace->msg_enqueued_cnt_ = 0;
+    // the_trace->msg_enqueued_cnt_ = 0;
+    LOG(INFO) << "MiniTrace: nativePollOnce(timeoutMillis = " << timeoutMillis << ") - exit";
   }
 }
 
@@ -812,13 +813,13 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
         // Then wait new idlehandler
         msg_enqueued_cnt_++;
       }
+      LOG(INFO) << "MiniTrace: enqueueMessage() " << (uptimeMillis - when);
     }
   }
-
   if (log_flag_ & kConnectAPE) {
-    /* Check every queueIdle */
-    if (UNLIKELY(thread == main_thread_ && method->GetMiniTraceType() == 2)) {
-      queueIdle_called_ = true;
+    // entering mQ.next()
+    if (UNLIKELY(method_msgq_next_ == method && main_msgq_ == this_object)) {
+      LOG(INFO) << "MiniTrace: next() - enter";
     }
   }
 }
@@ -835,9 +836,12 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
   }
 
   if (log_flag_ & kConnectAPE) {
+    // exiting mQ.next()
     if (UNLIKELY(method_msgq_next_ == method && main_msgq_ == this_object)) {
       msg_taken_ = true;
       if (queueIdle_called_) {
+        // special loop, there would be no extra message on mQ
+        // insert new idle handler
         poll_after_idle_ = true;
         queueIdle_called_ = false;
         MiniTraceThreadFlag orig_flag = thread->GetMiniTraceFlag();
@@ -845,13 +849,15 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
         thread->GetJniEnv()->CallVoidMethod(main_MessageQueue_, method_addIdleHandler, j_idler_);
         thread->SetMiniTraceFlag(orig_flag);
       }
+      LOG(INFO) << "MiniTrace: next() - exit " << queueIdle_called_;
     }
 
     /* Check every queueIdle */
-    if (UNLIKELY(thread == main_thread_ && method->GetMiniTraceType() == 2)) {
-      if (this_object == m_idler_) {
-        queueIdle_called_ = true;
-      }
+    if (UNLIKELY(thread == main_thread_
+                 && method->GetMiniTraceType() == 2
+                 && this_object == m_idler_)) {
+      LOG(INFO) << "MiniTrace: queueIdle() - exit";
+      queueIdle_called_ = true;
     }
   }
 }
