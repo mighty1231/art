@@ -108,6 +108,12 @@ static const uint16_t kMiniTraceHeaderLength     = 4+2+2+4+8;
 static const uint16_t kMiniTraceVersion          = 2;
 static const uint32_t kMiniTraceMagic            = 0x7254694D; // MiTr
 void *MiniTrace::nativePollOnce_originalEntry = NULL;
+Mutex *MiniTrace::MessageDetail::lock_ = new Mutex("msgbase_lock_");
+std::map<Thread *, std::vector<const MiniTrace::MessageDetail*>> MiniTrace::MessageDetail::thread_to_msgstack_;
+jmethodID MiniTrace::method_addIdleHandler = 0;
+jmethodID MiniTrace::method_Message_toString_ = 0;
+std::set<MiniTrace::MessageDetail> MiniTrace::MessageDetail::messages_;
+
 
 MiniTrace* volatile MiniTrace::the_trace_ = NULL;
 const char *MiniTrace::threadnames_to_exclude[] = {
@@ -643,7 +649,9 @@ void *MiniTrace::PingingTask(void *arg) {
     Append8LE(buf + 2, timestamp);
     the_trace->WriteRingBuffer(ringbuf_worker, buf, 10);
 
-    usleep(1000000); // 1 second
+    usleep(5000000); // 1 second
+
+    LOG(INFO) << MessageDetail::DumpMessages();
   }
   runtime->DetachCurrentThread();
 
@@ -665,6 +673,7 @@ void MiniTrace::new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass c
     }
     main_ptr = ptr;
     ScopedLocalRef<jclass> looperClass(env, env->FindClass("android/os/Looper"));
+    ScopedLocalRef<jclass> msgqClass(env, env->FindClass("android/os/MessageQueue"));
     ScopedLocalRef<jclass> idlerClass(env, env->FindClass("android/app/Instrumentation$Idler"));
     jmethodID getMainLooper = env->GetStaticMethodID(looperClass.get(),
         "getMainLooper", "()Landroid/os/Looper;");
@@ -672,7 +681,7 @@ void MiniTrace::new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass c
         "getQueue", "()Landroid/os/MessageQueue;");
     jmethodID idlerInit = env->GetMethodID(idlerClass.get(),
         "<init>", "(Ljava/lang/Runnable;)V");
-    the_trace->method_addIdleHandler = env->GetMethodID(the_trace->class_msgq_,
+    the_trace->method_addIdleHandler = env->GetMethodID(msgqClass.get(),
         "addIdleHandler", "(Landroid/os/MessageQueue$IdleHandler;)V");
     MiniTraceThreadFlag orig_flag = self->GetMiniTraceFlag();
     self->SetMiniTraceFlag(kMiniTraceExclude);
@@ -747,14 +756,17 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
   }
 
   main_thread_ = Thread::Current();
-  env_ = main_thread_->GetJniEnv();
+  JNIEnvExt* env = main_thread_->GetJniEnv();
 
-  ScopedObjectAccess soa(env_);
-  class_msgq_ = jclass(env_->NewGlobalRef(env_->FindClass("android/os/MessageQueue")));
-  jmethodID next = env_->GetMethodID(class_msgq_, "next", "()Landroid/os/Message;");
+  ScopedObjectAccess soa(env);
+  class_msgq_ = jclass(env->NewGlobalRef(env->FindClass("android/os/MessageQueue")));
+  jmethodID next = env->GetMethodID(class_msgq_, "next", "()Landroid/os/Message;");
   method_msgq_next_ = soa.DecodeMethod(next);
-  jmethodID enqueueMessage = env_->GetMethodID(class_msgq_, "enqueueMessage", "(Landroid/os/Message;J)Z");
+  jmethodID enqueueMessage = env->GetMethodID(class_msgq_, "enqueueMessage", "(Landroid/os/Message;J)Z");
   method_msgq_enqueueMessage_ = soa.DecodeMethod(enqueueMessage);
+
+  jclass class_Message = jclass(env->NewGlobalRef(env->FindClass("android/os/Message")));
+  method_Message_toString_ = env->GetMethodID(class_Message, "toString", "()Ljava/lang/String;");
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
@@ -785,41 +797,49 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
     main_msgq_ = this_object;
   }
 
-  if (UNLIKELY(main_msgq_ == this_object
-               && (log_flag_ & kConnectAPE)
-               && method == method_msgq_enqueueMessage_)) {
-    {
-      // enqueueMessage uses elapsed time after booting
-      // $ long uptimeMillis = SystemClock.uptimeMillis();
-      // It returns different value with System.currentTimeMillis();
-      int64_t uptimeMillis = systemTime(SYSTEM_TIME_MONOTONIC) / 1000000LL;
-
-      /**
-       * Fetch 2nd argument of enqueueMessage "when"
-       * enqueueMessage uses v9 as msg and v10 as when
-       * Analyzed bytecode of enqueueMessage with following code
-       *
-       * const DexFile::CodeItem* code_item = method_msgq_enqueueMessage_->GetCodeItem();
-       * const Instruction* inst;
-       * for (int i=0; i<300; i++) {
-       *   inst = Instruction::At(code_item->insns_ + dex_pc);
-       *   LOG(INFO) << "enqueueMessage" << i << ": " << inst->DumpString(method->GetDexFile());
-       *   dex_pc += inst->SizeInCodeUnits();
-       * }
-       */
-      int64_t when = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegLong(10);
-      if (when < uptimeMillis + 50) {
-        // The message is going to be handled soon
-        // Then wait new idlehandler
-        msg_enqueued_cnt_++;
-      }
-      LOG(INFO) << "MiniTrace: enqueueMessage() " << (uptimeMillis - when);
-    }
-  }
   if (log_flag_ & kConnectAPE) {
+    if (UNLIKELY(main_msgq_ == this_object
+                 && method == method_msgq_enqueueMessage_)) {
+      {
+        // enqueueMessage uses elapsed time after booting
+        // $ long uptimeMillis = SystemClock.uptimeMillis();
+        // It returns different value with System.currentTimeMillis();
+        int64_t uptimeMillis = systemTime(SYSTEM_TIME_MONOTONIC) / 1000000LL;
+
+        /**
+         * Fetch 2nd argument of enqueueMessage "when"
+         * enqueueMessage uses v9 as msg and v10 as when
+         * Analyzed bytecode of enqueueMessage with following code
+         *
+         * const DexFile::CodeItem* code_item = method_msgq_enqueueMessage_->GetCodeItem();
+         * const Instruction* inst;
+         * for (int i=0; i<300; i++) {
+         *   inst = Instruction::At(code_item->insns_ + dex_pc);
+         *   LOG(INFO) << "enqueueMessage" << i << ": " << inst->DumpString(method->GetDexFile());
+         *   dex_pc += inst->SizeInCodeUnits();
+         * }
+         */
+        int64_t when = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegLong(10);
+        if (when < uptimeMillis + 50) {
+          // The message is going to be handled soon
+          // Then wait new idlehandler
+          msg_enqueued_cnt_++;
+        }
+
+        mirror::Object *message = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegReference(9);
+        MessageDetail::cb_enqueueMessage(message);
+        LOG(INFO) << "MiniTrace: enqueueMessage() " << (uptimeMillis - when);
+      }
+    }
     // entering mQ.next()
     if (UNLIKELY(method_msgq_next_ == method && main_msgq_ == this_object)) {
       LOG(INFO) << "MiniTrace: next() - enter";
+    }
+
+    if (UNLIKELY(method->GetMiniTraceMarked() == 2 && thread == main_thread_)) {
+      // @TODO get dispatchMessage's first argument
+      mirror::Object *message = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegReference(2);
+      MessageDetail::cb_dispatchMessage_enter(message);
     }
   }
 }
@@ -854,10 +874,15 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
 
     /* Check every queueIdle */
     if (UNLIKELY(thread == main_thread_
-                 && method->GetMiniTraceType() == 2
+                 && method->GetMiniTraceMarked() == 1
                  && this_object == m_idler_)) {
       LOG(INFO) << "MiniTrace: queueIdle() - exit";
       queueIdle_called_ = true;
+    }
+
+    if (UNLIKELY(method->GetMiniTraceMarked() == 2 && thread == main_thread_)) {
+      // @TODO get dispatchMessage's first argument
+      MessageDetail::cb_dispatchMessage_exit();
     }
   }
 }
@@ -892,22 +917,13 @@ void MiniTrace::LogMessage(Thread* thread, const JValue& message) {
   if (ringbuf_worker == NULL)
     return;
 
-  static Thread *_thread = NULL;
-  static JNIEnvExt *env = NULL;
-  static jmethodID toString;
-  if (_thread == NULL) {
-    // initialize
-    _thread = thread;
-    env = thread->GetJniEnv();
-    toString = env->GetMethodID(class_msgq_, "toString", "()Ljava/lang/String;");
-  } else CHECK(_thread == thread);
-
+  JNIEnvExt *env = thread->GetJniEnv();
   MiniTraceThreadFlag orig_flag = thread->GetMiniTraceFlag();
   thread->SetMiniTraceFlag(kMiniTraceExclude);
 
   ScopedLocalRef<jobject> jmessage(env, env->NewLocalRef(message.GetL()));
   ScopedLocalRef<jobject> message_string(env,
-      env->CallObjectMethod(jmessage.get(), toString));
+      env->CallObjectMethod(jmessage.get(), method_Message_toString_));
   const char* message_cstring = env->GetStringUTFChars((jstring) message_string.get(), 0);
 
   LOG(INFO) << "MiniTrace: " << message_cstring;
@@ -1100,10 +1116,10 @@ bool* MiniTrace::GetExecutionData(Thread* self, mirror::ArtMethod* method) {
 
 void MiniTrace::PostClassPrepare(mirror::Class* klass, const char *descriptor) {
   static mirror::Class *idleHandlerClass = NULL;
+  static mirror::Class *handlerClass = NULL;
   if (idleHandlerClass == NULL && strcmp(descriptor, "Landroid/os/MessageQueue$IdleHandler;") == 0) {
     idleHandlerClass = klass;
   }
-
   if (klass->IsArrayClass() || klass->IsInterface() || klass->IsPrimitive()) {
     return;
   }
@@ -1157,6 +1173,12 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass, const char *descriptor) {
     }
   } else {
     // API methods
+    if (handlerClass == NULL && strcmp(descriptor, "Landroid/os/Handler;") == 0) {
+      handlerClass = klass;
+      mirror::ArtMethod *method = handlerClass->FindDeclaredVirtualMethod("dispatchMessage", "(Landroid/os/Message;)V");
+      CHECK(method != NULL);
+      method->SetMiniTraceMarked(2);
+    }
     if ((strncmp(descriptor, "Ljava/", 6) != 0)
         && (strncmp(descriptor, "Llibcore/", 9) != 0)
         && (strncmp(descriptor, "Landroid/system/", 16) != 0)
@@ -1184,9 +1206,16 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass, const char *descriptor) {
     if (interface == idleHandlerClass) {
       mirror::ArtMethod *method = klass->FindDeclaredVirtualMethod("queueIdle", "()Z");
       CHECK(method != NULL);
-      method->SetMiniTraceType(2);
+      method->SetMiniTraceMarked(1);
       break;
     }
+  }
+
+  // Mark dispatchMessage method of Landroid/os/Handler
+  if (handlerClass != NULL && klass->IsSubClass(handlerClass)) {
+    mirror::ArtMethod *method = klass->FindVirtualMethod("dispatchMessage", "(Landroid/os/Message;)V");
+    CHECK(method != NULL);
+    method->SetMiniTraceMarked(2);
   }
 }
 

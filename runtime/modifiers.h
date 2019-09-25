@@ -59,6 +59,12 @@ static constexpr uint32_t kAccMiniTraceType3            = 0x30000000;
 static constexpr uint32_t kAccMiniTraceTypeFlag         = 0x30000000;
 static constexpr uint32_t kAccMiniTraceTypeShift        = 28;
 
+// mark special methods
+static constexpr uint32_t kAccMiniTraceMarkedMask       = 0x00C00000;
+static constexpr uint32_t kAccMiniTraceMarkedFlag1      = 0x00400000;
+static constexpr uint32_t kAccMiniTraceMarkedFlag2      = 0x00800000;
+static constexpr uint32_t kAccMiniTraceMarkedShift      = 22;
+
 // class that minitrace processed
 static constexpr uint32_t kAccMiniTraceChecked          = 0x10000000;
 

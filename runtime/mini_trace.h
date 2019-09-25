@@ -41,6 +41,7 @@
 #include "safe_map.h"
 #include "ringbuf.h"
 #include "base/mutex.h"
+#include "ScopedLocalRef.h"
 
 // MAX_THREAD_COUNT may not be enough
 #define MAX_THREAD_COUNT 256
@@ -252,6 +253,114 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     std::string name_;
   };
 
+  /* Wrapper for android/os/Message */
+  class MessageDetail {
+  public:
+    bool operator< (const MessageDetail & other) const {
+      if (message_ == other.message_) {
+        return (info_.compare(other.info_)) < 0;
+      }
+      return message_ < other.message_;
+    }
+    /* Logged if MessageQueue is the main MessageQueue */
+    static void cb_enqueueMessage(mirror::Object *message) {
+      Thread *self = Thread::Current();
+      {
+        LOG(INFO) << "cb_enqueueMessage - " << message;
+        LOG(INFO) << "cb_enqueueMessage -----------------";
+        LOG(INFO) << MessageDetail::DumpMessages();
+        LOG(INFO) << "----------------- cb_enqueueMessage";
+        MutexLock mu(self, *lock_);
+        if (thread_to_msgstack_.find(self) != thread_to_msgstack_.end()) {
+          // yes reason
+          LOG(INFO) << "cb_enqueueMessage over " << thread_to_msgstack_[self].back();
+          messages_.emplace(message, thread_to_msgstack_[self].back());
+        } else {
+          // no reason
+          messages_.emplace(message);
+        }
+      }
+    }
+    /* Reason is logged for anytime */
+    static void cb_dispatchMessage_enter(mirror::Object *message) {
+    Thread *self = Thread::Current();
+      // enter
+      MutexLock mu(self, *lock_);
+      auto it = messages_.emplace(message);
+      const MessageDetail *messageDetail = &(*(it.first));
+      if (thread_to_msgstack_.find(self) != thread_to_msgstack_.end()) {
+        // if self in thread_to_msgstack_
+        thread_to_msgstack_[self].push_back(messageDetail);
+      } else {
+        // otherwise, make new vector
+        std::vector<const MessageDetail*> vec;
+        vec.push_back(messageDetail);
+        thread_to_msgstack_[self] = vec;
+      }
+    }
+    static void cb_dispatchMessage_exit() {
+      Thread *self = Thread::Current();
+      // exit
+      MutexLock mu(self, *lock_);
+      thread_to_msgstack_[self].pop_back();
+    }
+
+    MessageDetail(mirror::Object *message) :
+        message_(message), info_(message_toString(message)) {
+          std::string name;
+          Thread::Current()->GetThreadName(name);
+          reason_.assign(name);
+          LOG(INFO) << "New messageDetail " << info_;
+        }
+    MessageDetail(mirror::Object *message, const MessageDetail *reason_object):
+        message_(message), info_(message_toString(message)),
+        reason_(StringPrintf("%p %s",
+            reason_object->message_,
+            reason_object->info_.c_str())) {LOG(INFO) << "New MessageDetail " << info_;}
+
+    static std::string DumpMessages() {
+      Thread *self = Thread::Current();
+      std::string ret;
+      MutexLock mu(self, *lock_);
+      for (auto& it : messages_) {
+        const MessageDetail *detail = &it;
+        ret.append(StringPrintf("%p %s reason (%s)\n",
+          detail->message_, detail->info_.c_str(), detail->reason_.c_str()));
+      }
+      return ret;
+    }
+  private:
+    static std::string message_toString(mirror::Object *message) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+      Thread *thread = Thread::Current();
+      JNIEnvExt *env = thread->GetJniEnv();
+      std::string ret;
+      MiniTraceThreadFlag orig_flag = thread->GetMiniTraceFlag();
+      thread->SetMiniTraceFlag(kMiniTraceExclude);
+      {
+        ScopedLocalRef<jobject> jmessage(env, env->NewLocalRef(message));
+        ScopedLocalRef<jobject> message_string(env,
+            env->CallObjectMethod(jmessage.get(), method_Message_toString_));
+        const char* message_cstring = env->GetStringUTFChars((jstring) message_string.get(), 0);
+        ret.assign(message_cstring);
+        env->ReleaseStringUTFChars((jstring) message_string.get(), message_cstring);
+      }
+      thread->SetMiniTraceFlag(orig_flag);
+
+      // remove "when" part
+      // "{ when=-14s685ms callback=... }"
+      ret.erase(2, ret.find_first_of(" ", 2) - 1);
+      return ret;
+    }
+    static Mutex *lock_;
+    static std::set<MessageDetail> messages_;
+    static std::map<Thread *, std::vector<const MessageDetail*>> thread_to_msgstack_;
+    mirror::Object *message_;
+    std::string info_;
+
+    /* Messages are defined from dispatchMessage or just thread */
+    std::string reason_;
+  };
+
  private:
   explicit MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag,
                      uint32_t buffer_size, int ape_socket_fd);
@@ -368,6 +477,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   JNIEnvExt *env_;
   mirror::ArtMethod *method_msgq_next_;
   mirror::ArtMethod *method_msgq_enqueueMessage_;
+  mirror::ArtMethod *method_handler_dispatchMessage_;
   mirror::Object *main_msgq_;
   volatile bool msg_taken_;
 
@@ -380,7 +490,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   volatile int32_t msg_enqueued_cnt_;
   jclass class_msgq_;
   jobject main_MessageQueue_;
-  jmethodID method_addIdleHandler;
+  static jmethodID method_addIdleHandler;
+  static jmethodID method_Message_toString_;
 
   // Push simple log for every 1 second
   pthread_t pinging_thread_;

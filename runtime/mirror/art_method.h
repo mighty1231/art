@@ -162,21 +162,22 @@ class MANAGED ArtMethod FINAL : public Object {
     SetAccessFlags(GetAccessFlags() & ~kAccPortableCompiled);
   }
 
-  uint32_t GetMiniTraceType() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    switch (GetAccessFlags() & kAccMiniTraceTypeFlag) {
-      case kAccMiniTraceType1:
-        return 1;
-      case kAccMiniTraceType2:
-        return 2;
-      case kAccMiniTraceType3:
-        return 3;
-    }
-    return 0;
+  ALWAYS_INLINE uint32_t GetMiniTraceType() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return (GetAccessFlags() & kAccMiniTraceTypeFlag) >> kAccMiniTraceTypeShift;
   }
 
-  void SetMiniTraceType(uint32_t level) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+  ALWAYS_INLINE void SetMiniTraceType(uint32_t level) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     SetAccessFlags((GetAccessFlags() & ~kAccMiniTraceTypeFlag)
         | ((level & 3) << kAccMiniTraceTypeShift));
+  }
+
+  ALWAYS_INLINE uint32_t GetMiniTraceMarked() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return (GetAccessFlags() & kAccMiniTraceMarkedMask) >> kAccMiniTraceMarkedShift;
+  }
+
+  ALWAYS_INLINE void SetMiniTraceMarked(uint32_t mark) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SetAccessFlags((GetAccessFlags() & ~kAccMiniTraceMarkedMask)
+        | ((mark & 3) << kAccMiniTraceMarkedShift));
   }
 
   bool CheckIncompatibleClassChange(InvokeType type) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
