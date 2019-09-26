@@ -256,79 +256,118 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   /* Wrapper for android/os/Message */
   class MessageDetail {
   public:
-    bool operator< (const MessageDetail & other) const {
-      if (message_ == other.message_) {
-        return (info_.compare(other.info_)) < 0;
-      }
-      return message_ < other.message_;
-    }
     /* Logged if MessageQueue is the main MessageQueue */
     static void cb_enqueueMessage(mirror::Object *message) {
       Thread *self = Thread::Current();
       {
-        LOG(INFO) << "cb_enqueueMessage - " << message;
-        LOG(INFO) << "cb_enqueueMessage -----------------";
-        LOG(INFO) << MessageDetail::DumpMessages();
-        LOG(INFO) << "----------------- cb_enqueueMessage";
-        MutexLock mu(self, *lock_);
-        if (thread_to_msgstack_.find(self) != thread_to_msgstack_.end()) {
-          // yes reason
-          LOG(INFO) << "cb_enqueueMessage over " << thread_to_msgstack_[self].back();
-          messages_.emplace(message, thread_to_msgstack_[self].back());
+        MutexLock mu(self, *lock);
+        LOG(INFO) << "MessageDetail: enqueueMessage " << message;
+
+        // Find message
+        std::map<mirror::Object*, MessageDetail*>::iterator lm = last_messages_.find(message);
+        if (lm == last_messages_.end() || lm->second == NULL) {
+          // New message
+          auto reason_stack = thread_to_msgstack_.find(self);
+          if (reason_stack != thread_to_msgstack_.end()) {
+            // Reason exists
+            std::vector<MessageDetail*> vec = reason_stack->second;
+            if (!vec.empty()) {
+              MessageDetail *last_message = vec.back();
+              CHECK(last_message->magic_ == 12344321);
+              messages_.push_back(new MessageDetail(message, vec.back()));
+            } else {
+              messages_.push_back(new MessageDetail(message, self));
+            }
+          } else {
+            // Reason does not exist
+            messages_.push_back(new MessageDetail(message, self));
+          }
+          MessageDetail *detail = messages_.back();
+          last_messages_[message] = detail;
+          LOG(INFO) << "MessageDetail: 2 pointers " << last_messages_[message] << " / " << detail;
+          CHECK(last_messages_[message]->magic_ == 12344321) << last_messages_[message];
+          CHECK(detail->magic_ == 12344321) << detail;
+          cur_id_++;
+          LOG(INFO) << "MessageDetail: new message enqueued " << messages_.back()->Dump();
+          LOG(INFO) << MessageDetail::DumpAll(false);
         } else {
-          // no reason
-          messages_.emplace(message);
+          // Use again????
+          CHECK(0) << "Message " << message;
         }
       }
     }
     /* Reason is logged for anytime */
     static void cb_dispatchMessage_enter(mirror::Object *message) {
-    Thread *self = Thread::Current();
-      // enter
-      MutexLock mu(self, *lock_);
-      auto it = messages_.emplace(message);
-      const MessageDetail *messageDetail = &(*(it.first));
+      Thread *self = Thread::Current();
+      MutexLock mu(self, *lock);
+      LOG(INFO) << "MessageDetail: dispatchMessage " << message;
+      auto lm = last_messages_.find(message);
+      CHECK(lm != last_messages_.end()) << "Dispatching message have been never seen??" << MessageDetail::DumpAll(false);
+      MessageDetail *last_message = lm->second;
+      CHECK(last_message->magic_ == 12344321) << last_message;
       if (thread_to_msgstack_.find(self) != thread_to_msgstack_.end()) {
-        // if self in thread_to_msgstack_
-        thread_to_msgstack_[self].push_back(messageDetail);
+        thread_to_msgstack_[self].push_back(lm->second);
       } else {
-        // otherwise, make new vector
-        std::vector<const MessageDetail*> vec;
-        vec.push_back(messageDetail);
+        // otherwise, make new vector stack
+        std::vector<MessageDetail*> vec;
+        vec.push_back(last_message);
         thread_to_msgstack_[self] = vec;
       }
+      LOG(INFO) << MessageDetail::DumpAll(false);
     }
     static void cb_dispatchMessage_exit() {
       Thread *self = Thread::Current();
       // exit
-      MutexLock mu(self, *lock_);
+      MutexLock mu(self, *lock);
       thread_to_msgstack_[self].pop_back();
     }
 
-    MessageDetail(mirror::Object *message) :
-        message_(message), info_(message_toString(message)) {
-          std::string name;
-          Thread::Current()->GetThreadName(name);
-          reason_.assign(name);
-          LOG(INFO) << "New messageDetail " << info_;
-        }
-    MessageDetail(mirror::Object *message, const MessageDetail *reason_object):
-        message_(message), info_(message_toString(message)),
-        reason_(StringPrintf("%p %s",
-            reason_object->message_,
-            reason_object->info_.c_str())) {LOG(INFO) << "New MessageDetail " << info_;}
+    static void cb_Message_recycleUnchecked(mirror::Object *message) {
+      Thread *self = Thread::Current();
+      LOG(INFO) << "MessageDetail: recycleUnchecked " << message;
+      MutexLock mu(self, *lock);
+      auto lm = last_messages_.find(message);
+      CHECK(lm != last_messages_.end()) << "Recycling message have been never seen??" << MessageDetail::DumpAll(false);
+      lm->second = NULL;
+    }
 
-    static std::string DumpMessages() {
+    MessageDetail(mirror::Object *message, Thread *self):
+        message_(message), id_(cur_id_), info_(message_toString(message)),
+        magic_(12344321) {
+      std::string name;
+      self->GetThreadName(name);
+      reason_.assign(StringPrintf("[Thread %s]", name.c_str()));
+      LOG(INFO) << "MessageDetail: constructor " << message << ": " << info_;
+    }
+    MessageDetail(mirror::Object *message, MessageDetail *reason_object):
+        message_(message), id_(cur_id_), info_(message_toString(message)),
+        reason_(StringPrintf("[Message id %d]", reason_object->id_)),
+        magic_(12344321) {
+      LOG(INFO) << "MessageDetail: constructor " << message << ": " << info_;
+    }
+    static std::string DumpAll(bool use_lock) {
       Thread *self = Thread::Current();
       std::string ret;
-      MutexLock mu(self, *lock_);
-      for (auto& it : messages_) {
-        const MessageDetail *detail = &it;
-        ret.append(StringPrintf("%p %s reason (%s)\n",
-          detail->message_, detail->info_.c_str(), detail->reason_.c_str()));
+      if (use_lock) {
+        MutexLock mu(self, *lock);
+        for (auto it = messages_.begin(); it < messages_.end(); it++) {
+          MessageDetail *detail = (*it);
+          ret.append(StringPrintf("%p %s\n", detail, detail->Dump().c_str()));
+        }
+      } else {
+        for (auto it = messages_.begin(); it < messages_.end(); it++) {
+          MessageDetail *detail = (*it);
+          ret.append(StringPrintf("%p %s\n", detail, detail->Dump().c_str()));
+        }
       }
       return ret;
     }
+
+    std::string Dump() const {
+      return StringPrintf("[id %d] %p %s /r %s",
+        id_, message_, info_.c_str(), reason_.c_str());
+    }
+    static Mutex *lock;
   private:
     static std::string message_toString(mirror::Object *message) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
       Thread *thread = Thread::Current();
@@ -342,23 +381,30 @@ class MiniTrace : public instrumentation::InstrumentationListener {
             env->CallObjectMethod(jmessage.get(), method_Message_toString_));
         const char* message_cstring = env->GetStringUTFChars((jstring) message_string.get(), 0);
         ret.assign(message_cstring);
+        CHECK(strlen(message_cstring) > 0);
         env->ReleaseStringUTFChars((jstring) message_string.get(), message_cstring);
       }
       thread->SetMiniTraceFlag(orig_flag);
 
       // remove "when" part
       // "{ when=-14s685ms callback=... }"
+      //    ^^^^^^^^^^^^^^
       ret.erase(2, ret.find_first_of(" ", 2) - 1);
       return ret;
     }
-    static Mutex *lock_;
-    static std::set<MessageDetail> messages_;
-    static std::map<Thread *, std::vector<const MessageDetail*>> thread_to_msgstack_;
+    static std::vector<MessageDetail *> messages_;
+    static int cur_id_;
+    static std::map<mirror::Object *, MessageDetail *> last_messages_;
+    static std::map<Thread *, std::vector<MessageDetail *>> thread_to_msgstack_;
     mirror::Object *message_;
+    int id_;
     std::string info_;
 
     /* Messages are defined from dispatchMessage or just thread */
     std::string reason_;
+
+    // magic
+    int magic_;
   };
 
  private:
@@ -477,7 +523,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   JNIEnvExt *env_;
   mirror::ArtMethod *method_msgq_next_;
   mirror::ArtMethod *method_msgq_enqueueMessage_;
-  mirror::ArtMethod *method_handler_dispatchMessage_;
+  mirror::ArtMethod *method_Message_recycleUnchecked_;
   mirror::Object *main_msgq_;
   volatile bool msg_taken_;
 

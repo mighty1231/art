@@ -108,11 +108,13 @@ static const uint16_t kMiniTraceHeaderLength     = 4+2+2+4+8;
 static const uint16_t kMiniTraceVersion          = 2;
 static const uint32_t kMiniTraceMagic            = 0x7254694D; // MiTr
 void *MiniTrace::nativePollOnce_originalEntry = NULL;
-Mutex *MiniTrace::MessageDetail::lock_ = new Mutex("msgbase_lock_");
-std::map<Thread *, std::vector<const MiniTrace::MessageDetail*>> MiniTrace::MessageDetail::thread_to_msgstack_;
+int MiniTrace::MessageDetail::cur_id_ = 0;
+std::map<Thread *, std::vector<MiniTrace::MessageDetail*>> MiniTrace::MessageDetail::thread_to_msgstack_;
+std::map<mirror::Object *, MiniTrace::MessageDetail *> MiniTrace::MessageDetail::last_messages_;
 jmethodID MiniTrace::method_addIdleHandler = 0;
 jmethodID MiniTrace::method_Message_toString_ = 0;
-std::set<MiniTrace::MessageDetail> MiniTrace::MessageDetail::messages_;
+std::vector<MiniTrace::MessageDetail *> MiniTrace::MessageDetail::messages_;
+Mutex *MiniTrace::MessageDetail::lock = NULL;
 
 
 MiniTrace* volatile MiniTrace::the_trace_ = NULL;
@@ -339,6 +341,7 @@ void MiniTrace::Start() {
         CHECK(method_nativePollOnce != 0);
         nativePollOnce_originalEntry = method_nativePollOnce->GetEntryPointFromJni();
         method_nativePollOnce->SetEntryPointFromJni((void* )&new_android_os_MessageQueue_nativePollOnce);
+        MessageDetail::lock = new Mutex("MiniTrace MessageDetail lock");
       }
     }
     the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, 1024 * 1024, ape_socket_fd);
@@ -353,7 +356,6 @@ void MiniTrace::Start() {
     CHECK_PTHREAD_CALL(pthread_create, (&the_trace->pinging_thread_, NULL, &PingingTask,
                                         the_trace),
                                         "Pinging thread");
-
   }
   if (log_flag & (kLogMessage | kConnectAPE))
     log_flag |= (kDoMethodEntered | kDoMethodExited);
@@ -651,7 +653,7 @@ void *MiniTrace::PingingTask(void *arg) {
 
     usleep(5000000); // 1 second
 
-    LOG(INFO) << MessageDetail::DumpMessages();
+    LOG(INFO) << MessageDetail::DumpAll(true);
   }
   runtime->DetachCurrentThread();
 
@@ -767,6 +769,8 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
 
   jclass class_Message = jclass(env->NewGlobalRef(env->FindClass("android/os/Message")));
   method_Message_toString_ = env->GetMethodID(class_Message, "toString", "()Ljava/lang/String;");
+  jmethodID recycleUnchecked = env->GetMethodID(class_Message, "recycleUnchecked", "()V");
+  method_Message_recycleUnchecked_ = soa.DecodeMethod(recycleUnchecked);
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
@@ -793,7 +797,7 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
     LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodEntered);
 
   // Assume the first called next() is called with MessageQueue from main thread
-  if (UNLIKELY(method_msgq_next_ == method && main_msgq_ == NULL)) {
+  if (UNLIKELY(method_msgq_enqueueMessage_ == method && main_msgq_ == NULL)) {
     main_msgq_ = this_object;
   }
 
@@ -840,6 +844,10 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
       // @TODO get dispatchMessage's first argument
       mirror::Object *message = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegReference(2);
       MessageDetail::cb_dispatchMessage_enter(message);
+    }
+
+    if (UNLIKELY(method == method_Message_recycleUnchecked_)) {
+      MessageDetail::cb_Message_recycleUnchecked(this_object);
     }
   }
 }
