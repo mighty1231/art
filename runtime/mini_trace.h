@@ -265,7 +265,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
         // Find message
         std::map<mirror::Object*, MessageDetail*>::iterator lm = last_messages_.find(message);
-        CHECK(lm != last_messages_.end() && lm->second != NULL)
+        CHECK(lm == last_messages_.end() || lm->second == NULL)
             << "Same message enqueued during dispatching it, message = " << message;
           // New message
         auto reason_stack = thread_to_msgstack_.find(self);
@@ -302,7 +302,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         vec.push_back(last_message);
         thread_to_msgstack_[self] = vec;
       }
-      LOG(INFO) << MessageDetail::DumpAll(false);
+      // LOG(INFO) << MessageDetail::DumpAll(false);
     }
     static void cb_dispatchMessage_exit() {
       Thread *self = Thread::Current();
@@ -364,10 +364,11 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       std::string ret;
       MiniTraceThreadFlag orig_flag = thread->GetMiniTraceFlag();
       thread->SetMiniTraceFlag(kMiniTraceExclude);
+      ScopedObjectAccessUnchecked soa(thread);
       {
         ScopedLocalRef<jobject> jmessage(env, env->NewLocalRef(message));
         ScopedLocalRef<jobject> message_string(env,
-            env->CallObjectMethod(jmessage.get(), method_Message_toString_));
+            env->CallObjectMethod(jmessage.get(), soa.EncodeMethod(method_Message_toString_)));
         const char* message_cstring = env->GetStringUTFChars((jstring) message_string.get(), 0);
         ret.assign(message_cstring);
         CHECK(strlen(message_cstring) > 0);
@@ -507,11 +508,15 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   /* Used for logging messages / idlecheck task */
   Thread *main_thread_;
   JNIEnvExt *env_;
-  mirror::ArtMethod *method_msgq_next_;
-  mirror::ArtMethod *method_msgq_enqueueMessage_;
-  mirror::ArtMethod *method_Message_recycleUnchecked_;
+
+  /* Used for logging messages */
+  static mirror::ArtMethod *method_msgq_next_;
+  static mirror::ArtMethod *method_msgq_enqueueMessage_;
+  static mirror::ArtMethod *method_Message_recycleUnchecked_;
+  static mirror::ArtMethod *method_Message_toString_;
+
+  /* uses enqueueMessage and logging messages */
   mirror::Object *main_msgq_;
-  volatile bool msg_taken_;
 
   /* Used for idle checking */
   int ape_socket_fd_;
@@ -520,10 +525,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   volatile bool poll_after_idle_;
   volatile bool queueIdle_called_;
   volatile int32_t msg_enqueued_cnt_;
-  jclass class_msgq_;
   jobject main_MessageQueue_;
   static jmethodID method_addIdleHandler;
-  static jmethodID method_Message_toString_;
 
   // Push simple log for every 1 second
   pthread_t pinging_thread_;
