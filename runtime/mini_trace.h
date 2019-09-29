@@ -238,18 +238,18 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   class ThreadDetail {
   public:
-    ThreadDetail(pid_t pid, std::string name): pid_(pid), name_(name) {}
+    ThreadDetail(pid_t tid, std::string name): tid_(tid), name_(name) {}
     bool operator< (const ThreadDetail *other) const {
-      if (this->pid_ == other->pid_)
+      if (this->tid_ == other->tid_)
         return this->name_.compare(other->name_);
       else
-        return this->pid_ < other->pid_;
+        return this->tid_ < other->tid_;
     }
     void Dump(std::string &string) {
-      string.append(StringPrintf("%d\t%s\n", pid_, name_.c_str()));
+      string.append(StringPrintf("%d\t%s\n", tid_, name_.c_str()));
     }
   private:
-    pid_t pid_;
+    pid_t tid_;
     std::string name_;
   };
 
@@ -322,6 +322,14 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         // The message may be enqueued with MessageQueue.enqueueSyncBarrier
         // LOG(INFO) << << "Recycling message have been never seen??" << MessageDetail::DumpAll(false);
       }
+
+      /* For debugging purpose, check remaining messages */
+      int num_msg = 0;
+      for (auto const& it: last_messages_) {
+        if (it.second != NULL)
+          num_msg ++;
+      }
+      LOG(INFO) << "Remaining num_msg " << num_msg;
     }
 
     MessageDetail(mirror::Object *message, Thread *self):

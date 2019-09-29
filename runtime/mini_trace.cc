@@ -49,7 +49,9 @@
 namespace art {
 
 /**
- * File format:
+ * [ MiniTrace Version 2 ]
+ *
+ * *.bin file format:
  *     header
  *     record 0
  *     record 1
@@ -85,13 +87,17 @@ namespace art {
  *   char dumped[];
  *
  *
- * Idle event - length 10 (no action, differentiate this with tid=0)
+ * Idle event - length 10 (no action, identify this among events with tid=0)
  *   u2 tid=0;
  *   u8 timestamp_in_ms;
  *
- * Pinging event - length 10 (no action, differentiate this with tid=0)
+ * Pinging event - length 10 (no action, identify this among events with tid=1)
  *   u2 tid=1;
  *   u8 timestamp_in_ms;
+ *
+ * Thread terminated event - length 6 (no action, identify this among events with tid=2)
+ *   u2 tid=2;
+ *   s4 tid_terminated;
  */
 enum MiniTraceAction {
     kMiniTraceMethodEnter = 0x00,       // method entry
@@ -667,7 +673,7 @@ void *MiniTrace::PingingTask(void *arg) {
     Append8LE(buf + 2, timestamp);
     the_trace->WriteRingBuffer(ringbuf_worker, buf, 10);
 
-    usleep(1000000); // 1 second
+    usleep(1 * 1000 * 1000); // 1 second
     LOG(INFO) << "MiniTrace: 1 sec ping!";
 
     LOG(INFO) << MessageDetail::DumpAll(true);
@@ -1305,14 +1311,22 @@ void MiniTrace::UnregisterThread(Thread *thread) {
   size_t wid;
   ringbuf_worker_t *ringbuf_worker;
   if (thread->GetMiniTraceFlag() == kMiniTraceMarked) {
+    char buf[6];
     ringbuf_worker = thread->GetRingBufWorker();
+
+    /* Log termination of thread */
+    Append2LE(buf, 2); // tid = 2
+    Append4LE(buf + 2, thread->GetTid());
+    WriteRingBuffer(ringbuf_worker, buf, 6);
+
+    /* Unregister ringbuf */
     wid = ringbuf_w2i(ringbuf_, ringbuf_worker);
     {
       MutexLock mu(thread, *wids_registered_lock_);
       wids_registered_[wid] = false;
     }
     ringbuf_unregister(ringbuf_, ringbuf_worker);
-    thread->SetMiniTraceFlag(kMiniTraceExclude);
+    thread->SetMiniTraceFlag(kMiniTraceFirstSeen);
   }
 }
 
