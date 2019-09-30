@@ -268,24 +268,24 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         CHECK(lm == last_messages_.end() || lm->second == NULL)
             << "Same message enqueued during dispatching it, message = " << message;
           // New message
-        auto reason_stack = thread_to_msgstack_.find(self);
-        if (reason_stack != thread_to_msgstack_.end()) {
-          // Reason exists
-          std::vector<MessageDetail*> vec = reason_stack->second;
+        auto cause_stack = thread_to_msgstack_.find(self);
+        if (cause_stack != thread_to_msgstack_.end()) {
+          // cause exists
+          std::vector<MessageDetail*> vec = cause_stack->second;
           if (!vec.empty()) {
             messages_.push_back(new MessageDetail(message, vec.back()));
           } else {
             messages_.push_back(new MessageDetail(message, self));
           }
         } else {
-          // Reason does not exist
+          // cause does not exist
           messages_.push_back(new MessageDetail(message, self));
         }
         last_messages_[message] = messages_.back();
         cur_id_++;
       }
     }
-    /* Reason is logged for anytime */
+    /* cause is logged for anytime */
     static void cb_dispatchMessage_enter(mirror::Object *message) {
       Thread *self = Thread::Current();
       MutexLock mu(self, *lock);
@@ -307,6 +307,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     static void cb_dispatchMessage_exit() {
       Thread *self = Thread::Current();
       MutexLock mu(self, *lock);
+      LOG(INFO) << "MessageDetail: dispatchMessage exit";
       thread_to_msgstack_[self].pop_back();
     }
 
@@ -334,13 +335,12 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
     MessageDetail(mirror::Object *message, Thread *self):
         message_(message), id_(cur_id_), info_(message_toString(message)) {
-      std::string name;
-      self->GetThreadName(name);
-      reason_.assign(StringPrintf("[Thread %s]", name.c_str()));
+      MessageCauseFinder visitor(self, &cause_);
+      visitor.WalkStack(true);
     }
-    MessageDetail(mirror::Object *message, MessageDetail *reason_object):
+    MessageDetail(mirror::Object *message, MessageDetail *cause_object):
         message_(message), id_(cur_id_), info_(message_toString(message)),
-        reason_(StringPrintf("[Message id %d]", reason_object->id_)) {
+        cause_(StringPrintf("[Message id %d]", cause_object->id_)) {
     }
     static std::string DumpAll(bool use_lock) {
       Thread *self = Thread::Current();
@@ -362,10 +362,108 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
     std::string Dump() const {
       return StringPrintf("[id %d] %p %s /r %s",
-        id_, message_, info_.c_str(), reason_.c_str());
+        id_, message_, info_.c_str(), cause_.c_str());
     }
     static Mutex *lock;
   private:
+    struct MessageCauseFinder : public StackVisitor {
+      explicit MessageCauseFinder(Thread* thread, std::string *cause)
+          : StackVisitor(thread, NULL), tid_(thread->GetTid()), cause_(cause),
+            last_method_(NULL), last_shadow_frame_(NULL) {
+        thread->GetThreadName(tname_);
+        cause->assign(StringPrintf("[Thread %s(%d)]", tname_.c_str(), tid_));
+      }
+
+      bool VisitFrame() OVERRIDE SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+        mirror::ArtMethod *method = GetMethod();
+        if (method == method_Binder_execTransact_) {
+          cause_->assign(StringPrintf("[Thread %s(%d) - execTransact",
+              tname_.c_str(), tid_));
+          RecordArgumentValues();
+          cause_->append("]");
+          return false;
+        } else if (method == method_InputEventReceiver_dispatchInputEvent_) {
+          cause_->assign(StringPrintf("[Thread %s(%d) - dispatchInput",
+              tname_.c_str(), tid_));
+          RecordArgumentValues();
+          cause_->append("]");
+          return false;
+        } else if (method == method_msgq_nativePollOnce_) {
+          cause_->assign(StringPrintf("[Thread %s(%d) - nativePollOnce/%s",
+              tname_.c_str(), tid_, last_method_->GetName()));
+          RecordArgumentValues(last_method_, last_shadow_frame_);
+          cause_->append("]");
+          return false;
+        }
+        // For nativePollOnce, store the last method
+        if (LIKELY(method->GetInterfaceMethodIfProxy()->GetDexMethodIndex() != DexFile::kDexNoIndex)) {
+          last_method_ = method;
+          last_shadow_frame_ = GetCurrentShadowFrame();
+        }
+        return true;
+      }
+
+      void RecordArgumentValues()
+          SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+        RecordArgumentValues(GetMethod(), GetCurrentShadowFrame());
+      }
+
+      void RecordArgumentValues(mirror::ArtMethod *method, ShadowFrame *shadow_frame)
+          SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+        CHECK(!method->IsAbstract());
+        const DexFile::CodeItem* code_item = method->GetCodeItem();
+        uint16_t num_regs;
+        uint16_t num_ins;
+        if (code_item != NULL) {
+          num_regs =  code_item->registers_size_;
+          num_ins = code_item->ins_size_;
+        } else {
+          DCHECK(method->IsNative());
+          num_regs = num_ins = mirror::ArtMethod::NumArgRegisters(method->GetShorty());
+          if (!method->IsStatic()) {
+            num_regs++;
+            num_ins++;
+          }
+        }
+
+        size_t cur_reg = num_regs - num_ins;
+        if (!method->IsStatic()) {
+          mirror::Object *receiver = shadow_frame->GetVRegReference(cur_reg);
+          StringAppendF(cause_, " %zu/this:%p", cur_reg, receiver);
+          ++cur_reg;
+        }
+        uint32_t shorty_len = 0;
+        const char* shorty = method->GetShorty(&shorty_len);
+        for (size_t shorty_pos = 0, arg_pos = 0; cur_reg < num_regs; ++shorty_pos, ++arg_pos, cur_reg++) {
+          DCHECK_LT(shorty_pos + 1, shorty_len);
+          switch (shorty[shorty_pos + 1]) {
+            case 'L': {
+              StringAppendF(cause_, " %zu/%c:%p", cur_reg, shorty[shorty_pos+1],
+                  shadow_frame->GetVRegReference(cur_reg));
+              break;
+            }
+            case 'J': case 'D': {
+              StringAppendF(cause_, " %zu/%c:%" PRId64, cur_reg, shorty[shorty_pos+1],
+                  shadow_frame->GetVRegLong(cur_reg));
+              cur_reg++;
+              arg_pos++;
+              break;
+            }
+            default:
+              StringAppendF(cause_, " %zu/%c:%d", cur_reg, shorty[shorty_pos+1],
+                  shadow_frame->GetVReg(cur_reg));
+              break;
+          }
+        }
+      }
+      pid_t tid_;
+      std::string tname_;
+      std::string *cause_; // output value for VisitFrame
+
+      /* For nativePollOnce-caused messages */
+      mirror::ArtMethod *last_method_;
+      ShadowFrame *last_shadow_frame_;
+    };
     static std::string message_toString(mirror::Object *message) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
       Thread *thread = Thread::Current();
       JNIEnvExt *env = thread->GetJniEnv();
@@ -399,7 +497,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     std::string info_;
 
     /* Messages are defined from dispatchMessage or just thread */
-    std::string reason_;
+    std::string cause_;
   };
 
  private:
@@ -520,8 +618,14 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   /* Used for logging messages */
   static mirror::ArtMethod *method_msgq_next_;
   static mirror::ArtMethod *method_msgq_enqueueMessage_;
+  static mirror::ArtMethod *method_msgq_nativePollOnce_;
   static mirror::ArtMethod *method_Message_recycleUnchecked_;
   static mirror::ArtMethod *method_Message_toString_;
+  static mirror::ArtMethod *method_Binder_execTransact_;
+  static mirror::ArtMethod *method_BinderProxy_transact_;
+  static mirror::ArtMethod *method_BinderProxy_getInterfaceDescriptor_;
+  static mirror::ArtMethod *method_InputEventReceiver_dispatchInputEvent_;
+  static mirror::ArtMethod *method_InputEventReceiver_finishInputEvent_;
 
   /* uses enqueueMessage and logging messages */
   mirror::Object *main_msgq_;
