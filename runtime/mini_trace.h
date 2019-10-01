@@ -18,7 +18,6 @@
 #define ART_RUNTIME_MINI_TRACE_H_
 
 #include <memory>
-#include <ostream>
 #include <set>
 #include <string>
 #include <vector>
@@ -66,30 +65,44 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     kDoFieldRead         = 0x00000010,
     kDoFieldWritten      = 0x00000020,
     kDoExceptionCaught   = 0x00000040,
-    kInstListener        = 0x00000077, /* Currently, DexPcMoved is not used */
+    kInstListener        = 0x00000077,  /* Currently, DexPcMoved is not used */
 
     /* Flags used only for MiniTrace */
     kDoCoverage          = 0x00000080,
-    kLogMessage          = 0x00000100, // log all messages on main looper
+    kLogMessage          = 0x00000100,  // log all messages on main looper
 
     /* Flags used for communicate with ape */
-    kConnectAPE          = 0x00010000, // If set, communicates with APE
+    kConnectAPE          = 0x00010000,  // If set, communicates with APE
 
     /* Ping flag */
-    kLogOneSecPing       = 0x00020000, // If set, push simple log for every 1 second
+    kLogOneSecPing       = 0x00020000,  // If set, push simple log for every 1 second
 
     /* Flags used for filtering objects */
     kLogFieldTypeFlags   = 0x0F000000,
-    kLogFieldType0       = 0x01000000, // All the other fields
-    kLogFieldType1       = 0x02000000, // UNUSED
-    kLogFieldType2       = 0x04000000, // UNUSED
-    kLogFieldType3       = 0x08000000, // fields defined on app
+    kLogFieldType0       = 0x01000000,  // All the other fields
+    kLogFieldType1       = 0x02000000,  // UNUSED
+    kLogFieldType2       = 0x04000000,  // UNUSED
+    kLogFieldType3       = 0x08000000,  // fields defined on app
     kLogMethodTypeFlags  = 0xF0000000,
-    kLogMethodType0      = 0x10000000, // Basic API methods
-    kLogMethodType1      = 0x20000000, // Non-basic API methods
-    kLogMethodType2      = 0x40000000, // IdleHandler$queueIdle
-    kLogMethodType3      = 0x80000000, // methods defined on app
+    kLogMethodType0      = 0x10000000,  // Basic API methods
+    kLogMethodType1      = 0x20000000,  // Non-basic API methods
+    kLogMethodType2      = 0x40000000,  // IdleHandler$queueIdle
+    kLogMethodType3      = 0x80000000,  // methods defined on app
     kFlagAll             = 0xFF0301FF
+  };
+
+  enum MessageStatus {
+    kMessageInitial,
+    kMessageEnqueued,
+    kMessageIdled,
+    kMessageLooperMessageSent
+  };
+
+  enum MessageStatusTransition {
+    kMessageTransitionEnqueued,
+    kMessageTransitionQueueIdleExited,
+    kMessageTransitionNativePollOnceEntered,
+    kMessageTransitionNativePollOnceExited
   };
 
   static void Start()
@@ -144,8 +157,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   static void *PingingTask(void *mt_object);
 
   class ArtMethodDetail {
-  public:
-    ArtMethodDetail(mirror::ArtMethod* method) : method_(method) {
+   public:
+    explicit ArtMethodDetail(mirror::ArtMethod* method) : method_(method) {
       // @TODO Is this detail enough? consider argument type & return type
       const char *descriptor = method->GetDeclaringClassDescriptor();
       if (descriptor == NULL)
@@ -153,7 +166,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       else
         classDescriptor_.assign(descriptor);
       name_.assign(method->GetName());
-      signature_.assign(method->GetSignature().ToString()); // It never fails, "<no signature>" in dexfile.cc:994
+      signature_.assign(method->GetSignature().ToString());  // It never fails, "<no signature>" in dexfile.cc:994
       const char *declaringClassSourceFile = method->GetDeclaringClassSourceFile();
       if (declaringClassSourceFile == NULL)
         declaringClassSourceFile_.assign("NoClassSourceFile");
@@ -168,10 +181,10 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         classDescriptor_.c_str(),
         name_.c_str(),
         signature_.c_str(),
-        declaringClassSourceFile_.c_str()
-      ));
+        declaringClassSourceFile_.c_str()));
     }
-  private:
+
+   private:
     mirror::ArtMethod* method_;
     std::string classDescriptor_;
     std::string name_;
@@ -180,8 +193,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   };
 
   class ArtFieldDetail {
-  public:
-    ArtFieldDetail(mirror::ArtField *field) : field_(field),
+   public:
+    explicit ArtFieldDetail(mirror::ArtField *field) : field_(field),
         typeDesc_(field->GetTypeDescriptor()), next_(NULL) {
       Thread *self = Thread::Current();
       Locks::mutator_lock_->SharedLock(self);
@@ -228,7 +241,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       cur->next_ = new ArtFieldDetail(field);
       return idx;
     }
-  private:
+
+   private:
     mirror::ArtField* field_;
     std::string classDescriptor_;
     std::string name_;
@@ -237,7 +251,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   };
 
   class ThreadDetail {
-  public:
+   public:
     ThreadDetail(pid_t tid, std::string name): tid_(tid), name_(name) {}
     bool operator< (const ThreadDetail *other) const {
       if (this->tid_ == other->tid_)
@@ -248,16 +262,16 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     void Dump(std::string &string) {
       string.append(StringPrintf("%d\t%s\n", tid_, name_.c_str()));
     }
-  private:
+   private:
     pid_t tid_;
     std::string name_;
   };
 
   /* Wrapper for android/os/Message */
   class MessageDetail {
-  public:
+   public:
     /* Logged if MessageQueue is the main MessageQueue */
-    static void cb_enqueueMessage(mirror::Object *message) {
+    static bool cb_enqueueMessage(mirror::Object *message, bool late) {
       Thread *self = Thread::Current();
       {
         MutexLock mu(self, *lock);
@@ -267,22 +281,25 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         std::map<mirror::Object*, MessageDetail*>::iterator lm = last_messages_.find(message);
         CHECK(lm == last_messages_.end() || lm->second == NULL)
             << "Same message enqueued during dispatching it, message = " << message;
-          // New message
+        // New message
+        MessageDetail *new_msg_detail;
         auto cause_stack = thread_to_msgstack_.find(self);
         if (cause_stack != thread_to_msgstack_.end()) {
           // cause exists
           std::vector<MessageDetail*> vec = cause_stack->second;
           if (!vec.empty()) {
-            messages_.push_back(new MessageDetail(message, vec.back()));
+            new_msg_detail = new MessageDetail(message, late, vec.back());
           } else {
-            messages_.push_back(new MessageDetail(message, self));
+            new_msg_detail = new MessageDetail(message, late, self);
           }
         } else {
           // cause does not exist
-          messages_.push_back(new MessageDetail(message, self));
+          new_msg_detail = new MessageDetail(message, late, self);
         }
+        messages_.push_back(new_msg_detail);
         last_messages_[message] = messages_.back();
         cur_id_++;
+        return new_msg_detail->cause_unknown_;
       }
     }
     /* cause is logged for anytime */
@@ -326,22 +343,37 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
       /* For debugging purpose, check remaining messages */
       int num_msg = 0;
-      for (auto const& it: last_messages_) {
+      for (auto const& it : last_messages_) {
         if (it.second != NULL)
-          num_msg ++;
+          num_msg++;
       }
       LOG(INFO) << "Remaining num_msg " << num_msg;
     }
 
-    MessageDetail(mirror::Object *message, Thread *self):
-        message_(message), id_(cur_id_), info_(message_toString(message)) {
+    MessageDetail(mirror::Object *message, bool late, Thread *self):
+        message_(message), id_(cur_id_), late_(late) {
+      info_.assign(message_toString(message));
       MessageCauseFinder visitor(self, &cause_);
       visitor.WalkStack(true);
+      cause_unknown_ = visitor.unknown_;
     }
-    MessageDetail(mirror::Object *message, MessageDetail *cause_object):
-        message_(message), id_(cur_id_), info_(message_toString(message)),
-        cause_(StringPrintf("[Message id %d]", cause_object->id_)) {
+    MessageDetail(mirror::Object *message, bool late, MessageDetail *cause_object):
+        message_(message), id_(cur_id_),  late_(late),
+        cause_(StringPrintf("[Message id %d]", cause_object->id_)), cause_unknown_(true) {
+      info_.assign(message_toString(message));
     }
+
+    static bool NoMoreMessage() {
+      MutexLock mu(Thread::Current(), *lock);
+      for (auto const& it : last_messages_) {
+        MessageDetail *detail = it.second;
+        if (detail != NULL && !detail->late_) {
+          return false;
+        }
+      }
+      return true;
+    }
+
     static std::string DumpAll(bool use_lock) {
       Thread *self = Thread::Current();
       std::string ret;
@@ -365,11 +397,12 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         id_, message_, info_.c_str(), cause_.c_str());
     }
     static Mutex *lock;
-  private:
+
+   private:
     struct MessageCauseFinder : public StackVisitor {
       explicit MessageCauseFinder(Thread* thread, std::string *cause)
           : StackVisitor(thread, NULL), tid_(thread->GetTid()), cause_(cause),
-            last_method_(NULL), last_shadow_frame_(NULL) {
+            unknown_(true), last_method_(NULL), last_shadow_frame_(NULL) {
         thread->GetThreadName(tname_);
         cause->assign(StringPrintf("[Thread %s(%d)]", tname_.c_str(), tid_));
       }
@@ -381,18 +414,21 @@ class MiniTrace : public instrumentation::InstrumentationListener {
               tname_.c_str(), tid_));
           RecordArgumentValues();
           cause_->append("]");
+          unknown_ = false;
           return false;
         } else if (method == method_InputEventReceiver_dispatchInputEvent_) {
           cause_->assign(StringPrintf("[Thread %s(%d) - dispatchInput",
               tname_.c_str(), tid_));
           RecordArgumentValues();
           cause_->append("]");
+          unknown_ = false;
           return false;
         } else if (method == method_msgq_nativePollOnce_) {
           cause_->assign(StringPrintf("[Thread %s(%d) - nativePollOnce/%s",
               tname_.c_str(), tid_, last_method_->GetName()));
           RecordArgumentValues(last_method_, last_shadow_frame_);
           cause_->append("]");
+          unknown_ = false;
           return false;
         }
         // For nativePollOnce, store the last method
@@ -458,7 +494,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       }
       pid_t tid_;
       std::string tname_;
-      std::string *cause_; // output value for VisitFrame
+      std::string *cause_;  // output value for VisitFrame
+      bool unknown_;
 
       /* For nativePollOnce-caused messages */
       mirror::ArtMethod *last_method_;
@@ -477,15 +514,16 @@ class MiniTrace : public instrumentation::InstrumentationListener {
             env->CallObjectMethod(jmessage.get(), soa.EncodeMethod(method_Message_toString_)));
         const char* message_cstring = env->GetStringUTFChars((jstring) message_string.get(), 0);
         ret.assign(message_cstring);
-        CHECK(strlen(message_cstring) > 0);
         env->ReleaseStringUTFChars((jstring) message_string.get(), message_cstring);
       }
       thread->SetMiniTraceFlag(orig_flag);
 
       // remove "when" part
-      // "{ when=-14s685ms callback=... }"
-      //    ^^^^^^^^^^^^^^
-      ret.erase(2, ret.find_first_of(" ", 2) - 1);
+      // IN  "{ when=-14s685ms callback=... }"
+      //        ^^^^^^^^^^^^^^
+      // OUT "{ callback=... }"
+      size_t found = ret.find(' ', 2);
+      ret.erase(2, found - 1);
       return ret;
     }
     static std::vector<MessageDetail *> messages_;
@@ -495,9 +533,11 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     mirror::Object *message_;
     int id_;
     std::string info_;
+    bool late_;
 
     /* Messages are defined from dispatchMessage or just thread */
     std::string cause_;
+    bool cause_unknown_;
   };
 
  private:
@@ -528,6 +568,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   void ReadBuffer(char *dest, size_t offset, size_t len);
   void WriteRingBuffer(ringbuf_worker_t *worker, const char *src, size_t len);
+
+  void ForwardMessageStatus(MessageStatusTransition transition) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   static void new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass clazz,
         jlong ptr, jint timeoutMillis);
@@ -613,7 +655,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   /* Used for logging messages / idlecheck task */
   Thread *main_thread_;
-  JNIEnvExt *env_;
+  MessageStatus message_status_;
+  Mutex *message_status_lock_;
 
   /* Used for logging messages */
   static mirror::ArtMethod *method_msgq_next_;
@@ -632,12 +675,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   /* Used for idle checking */
   int ape_socket_fd_;
+  mirror::Object *main_MessageQueue_;
   mirror::Object *m_idler_;
-  jobject j_idler_;
-  volatile bool poll_after_idle_;
-  volatile bool queueIdle_called_;
-  volatile int32_t msg_enqueued_cnt_;
-  jobject main_MessageQueue_;
   static jmethodID method_addIdleHandler;
 
   // Push simple log for every 1 second

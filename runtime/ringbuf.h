@@ -38,7 +38,7 @@
  */
 #ifndef atomic_compare_exchange_weak
 #define atomic_compare_exchange_weak(ptr, expected, desired) \
-    __sync_bool_compare_and_swap(ptr, expected, desired)
+  __sync_bool_compare_and_swap(ptr, expected, desired)
 #endif
 
 #ifndef atomic_thread_fence
@@ -67,11 +67,11 @@
 #endif
 #define SPINLOCK_BACKOFF(count)                 \
 do {                                \
-    for (int __i = (count); __i != 0; __i--) {      \
-        SPINLOCK_BACKOFF_HOOK;              \
-    }                           \
-    if ((count) < SPINLOCK_BACKOFF_MAX)         \
-        (count) += (count);             \
+  for (int __i = (count); __i != 0; __i--) {      \
+    SPINLOCK_BACKOFF_HOOK;              \
+  }                           \
+  if ((count) < SPINLOCK_BACKOFF_MAX)         \
+    (count) += (count);             \
 } while (/* CONSTCOND */ 0);
 
 
@@ -80,26 +80,26 @@ namespace art {
 typedef uint32_t        ringbuf_off_t;
 
 typedef struct ringbuf_worker {
-    volatile ringbuf_off_t  seen_off;
-    int                     registered;
+  volatile ringbuf_off_t  seen_off;
+  int                     registered;
 } ringbuf_worker_t;
 
 typedef struct ringbuf {
-    /* Ring buffer space. */
-    size_t                  space;
+  /* Ring buffer space. */
+  size_t                  space;
 
-    /*
-     * The NEXT hand is atomically updated by the producer.
-     * WRAP_LOCK_BIT is set in case of wrap-around; in such case,
-     * the producer can update the 'end' offset.
-     */
-    volatile ringbuf_off_t  next;
-    ringbuf_off_t           end;
+  /*
+   * The NEXT hand is atomically updated by the producer.
+   * WRAP_LOCK_BIT is set in case of wrap-around; in such case,
+   * the producer can update the 'end' offset.
+   */
+  volatile ringbuf_off_t  next;
+  ringbuf_off_t           end;
 
-    /* The following are updated by the consumer. */
-    ringbuf_off_t           written;
-    unsigned                nworkers;
-    ringbuf_worker_t        workers[];
+  /* The following are updated by the consumer. */
+  ringbuf_off_t           written;
+  unsigned                nworkers;
+  ringbuf_worker_t        workers[];
 } ringbuf_t;
 
 int             ringbuf_setup(ringbuf_t *, unsigned, size_t);
