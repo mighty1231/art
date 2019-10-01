@@ -121,13 +121,13 @@ void *MiniTrace::nativePollOnce_originalEntry = NULL;
 int MiniTrace::MessageDetail::cur_id_ = 0;
 std::map<Thread *, std::vector<MiniTrace::MessageDetail*>> MiniTrace::MessageDetail::thread_to_msgstack_;
 std::map<mirror::Object *, MiniTrace::MessageDetail *> MiniTrace::MessageDetail::last_messages_;
-jmethodID MiniTrace::method_addIdleHandler = 0;
 mirror::ArtMethod *MiniTrace::method_msgq_next_ = NULL;
 mirror::ArtMethod *MiniTrace::method_msgq_enqueueMessage_ = NULL;
 mirror::ArtMethod *MiniTrace::method_msgq_nativePollOnce_ = NULL;
 mirror::ArtMethod *MiniTrace::method_Message_recycleUnchecked_ = NULL;
 mirror::ArtMethod *MiniTrace::method_Message_toString_ = NULL;
 mirror::ArtMethod *MiniTrace::method_Binder_execTransact_ = NULL;
+mirror::ArtField *MiniTrace::field_Binder_mDescriptor_ = NULL;
 mirror::ArtMethod *MiniTrace::method_BinderProxy_transact_ = NULL;
 mirror::ArtMethod *MiniTrace::method_BinderProxy_getInterfaceDescriptor_ = NULL;
 mirror::ArtMethod *MiniTrace::method_InputEventReceiver_dispatchInputEvent_ = NULL;
@@ -187,6 +187,57 @@ static void Append8LE(char* buf, uint64_t val) {
 }
 
 #endif /* _BYTE_ORDER */
+
+void StringAppendArgumentValues(std::string *string_p, mirror::ArtMethod *method, ShadowFrame *shadow_frame) {
+  CHECK(!method->IsAbstract());
+  const DexFile::CodeItem* code_item = method->GetCodeItem();
+  uint16_t num_regs;
+  uint16_t num_ins;
+  if (code_item != NULL) {
+    num_regs =  code_item->registers_size_;
+    num_ins = code_item->ins_size_;
+  } else {
+    DCHECK(method->IsNative());
+    num_regs = num_ins = mirror::ArtMethod::NumArgRegisters(method->GetShorty());
+    if (!method->IsStatic()) {
+      num_regs++;
+      num_ins++;
+    }
+  }
+
+  size_t cur_reg = num_regs - num_ins;
+  if (!method->IsStatic()) {
+    mirror::Object *receiver = shadow_frame->GetVRegReference(cur_reg);
+    StringAppendF(string_p, " this:%p", receiver);
+    ++cur_reg;
+  }
+  uint32_t shorty_len = 0;
+  const char* shorty = method->GetShorty(&shorty_len);
+  for (size_t shorty_pos = 0, arg_pos = 0; cur_reg < num_regs; ++shorty_pos, ++arg_pos, cur_reg++) {
+    DCHECK_LT(shorty_pos + 1, shorty_len);
+    switch (shorty[shorty_pos + 1]) {
+      case 'L': {
+        StringAppendF(string_p, " %c:%p",
+            shorty[shorty_pos+1],
+            shadow_frame->GetVRegReference(cur_reg));
+        break;
+      }
+      case 'J': case 'D': {
+        StringAppendF(string_p, " %c:%" PRId64,
+            shorty[shorty_pos+1],
+            shadow_frame->GetVRegLong(cur_reg));
+        cur_reg++;
+        arg_pos++;
+        break;
+      }
+      default:
+        StringAppendF(string_p, " %c:%d",
+            shorty[shorty_pos+1],
+            shadow_frame->GetVReg(cur_reg));
+        break;
+    }
+  }
+}
 
 static int read_with_timeout(int socket_fd, void *buf, int size, int timeout_sec) {
   int total_written = 0;
@@ -303,59 +354,15 @@ static int CreateSocketAndCheckAPE() {
 //   }
 // }
 
-static void PrintArgumentOnCurrentFrame(mirror::ArtMethod *method) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  CHECK(!method->IsAbstract());
+static std::string ArgumentsOnCurrentFrame(mirror::ArtMethod *method) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
   Thread *self = Thread::Current();
-  const DexFile::CodeItem* code_item = method->GetCodeItem();
-  uint16_t num_regs;
-  uint16_t num_ins;
-  if (code_item != NULL) {
-    num_regs =  code_item->registers_size_;
-    num_ins = code_item->ins_size_;
-  } else {
-    DCHECK(method->IsNative());
-    num_regs = num_ins = mirror::ArtMethod::NumArgRegisters(method->GetShorty());
-    if (!method->IsStatic()) {
-      num_regs++;
-      num_ins++;
-    }
-  }
-
-  std::string info = StringPrintf("%s %s", method->GetName(), method->GetShorty());
-
-  // Set up shadow frame with matching number of reference slots to vregs.
+  std::string tname;
+  self->GetThreadName(tname);
+  std::string result = StringPrintf("[%s(%d)] %s %s",
+    tname.c_str(), self->GetTid(), method->GetName(), method->GetShorty());
   ShadowFrame* last_shadow_frame = self->GetManagedStack()->GetTopShadowFrame();
-
-  size_t cur_reg = num_regs - num_ins;
-  if (!method->IsStatic()) {
-    mirror::Object *receiver = last_shadow_frame->GetVRegReference(cur_reg);
-    StringAppendF(&info, " %zu/this:%p", cur_reg, receiver);
-    ++cur_reg;
-  }
-  uint32_t shorty_len = 0;
-  const char* shorty = method->GetShorty(&shorty_len);
-  for (size_t shorty_pos = 0, arg_pos = 0; cur_reg < num_regs; ++shorty_pos, ++arg_pos, cur_reg++) {
-    DCHECK_LT(shorty_pos + 1, shorty_len);
-    switch (shorty[shorty_pos + 1]) {
-      case 'L': {
-        StringAppendF(&info, " %zu/%c:%p", cur_reg, shorty[shorty_pos+1],
-            last_shadow_frame->GetVRegReference(cur_reg));
-        break;
-      }
-      case 'J': case 'D': {
-        StringAppendF(&info, " %zu/%c:%" PRId64, cur_reg, shorty[shorty_pos+1],
-            last_shadow_frame->GetVRegLong(cur_reg));
-        cur_reg++;
-        arg_pos++;
-        break;
-      }
-      default:
-        StringAppendF(&info, " %zu/%c:%d", cur_reg, shorty[shorty_pos+1],
-            last_shadow_frame->GetVReg(cur_reg));
-        break;
-    }
-  }
-  LOG(INFO) << "MiniTrace: " << info;
+  StringAppendArgumentValues(&result, method, last_shadow_frame);
+  return result;
 }
 
 void MiniTrace::ReadBuffer(char *dest, size_t offset, size_t len) {
@@ -767,36 +774,14 @@ void MiniTrace::new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass c
   }
   if (main_ptr == ptr) {  // if main MessageQueue,
     LOG(INFO) << "MiniTrace: nativePollOnce(timeoutMillis = " << timeoutMillis << ") - enter";
-    Locks::mutator_lock_->SharedLock(Thread::Current());
     the_trace->ForwardMessageStatus(kMessageTransitionNativePollOnceEntered);
-    Locks::mutator_lock_->SharedUnlock(Thread::Current());
-    // if (the_trace->poll_after_idle_) {
-    //   if (the_trace->msg_enqueued_cnt_ > 0) {
-    //     // Wait another idle
-    //     LOG(INFO) << "MiniTrace: Wait another idle";
-    //     the_trace->msg_enqueued_cnt_ = 0;
-    //   } else {
-    //     // Send idle status
-    //     // add idle handler
-    //     LOG(INFO) << "MiniTrace: Real idle!";
-    //     gettimeofday(&now, NULL);
-    //     int64_t now_long = now.tv_sec * 1000LL + now.tv_usec / 1000;
-
-    //     Append8LE(buf + 2, now_long);
-    //     the_trace->WriteRingBuffer(the_trace->main_thread_->GetRingBufWorker(), buf, 10);
-    //     write(the_trace->ape_socket_fd_, &now_long, sizeof (uint64_t));
-    //   }
-    //   the_trace->poll_after_idle_ = false;
-    // }
   }
   fntype* const fn = reinterpret_cast<fntype*>(MiniTrace::nativePollOnce_originalEntry);
   fn(env, clazz, ptr, timeoutMillis);
   if (main_ptr == ptr) {
     // the_trace->msg_enqueued_cnt_ = 0;
     LOG(INFO) << "MiniTrace: nativePollOnce(timeoutMillis = " << timeoutMillis << ") - exit";
-    Locks::mutator_lock_->SharedLock(Thread::Current());
     the_trace->ForwardMessageStatus(kMessageTransitionNativePollOnceExited);
-    Locks::mutator_lock_->SharedUnlock(Thread::Current());
   }
 }
 
@@ -835,10 +820,13 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
   main_thread_ = Thread::Current();
   CHECK(method_msgq_next_);
   CHECK(method_msgq_enqueueMessage_);
+  CHECK(method_msgq_nativePollOnce_);
   CHECK(method_Message_recycleUnchecked_);
   CHECK(method_Message_toString_);
   CHECK(method_Binder_execTransact_);
+  CHECK(field_Binder_mDescriptor_);
   CHECK(method_BinderProxy_transact_);
+  CHECK(method_BinderProxy_getInterfaceDescriptor_);
   CHECK(method_InputEventReceiver_dispatchInputEvent_);
   CHECK(method_InputEventReceiver_finishInputEvent_);
 }
@@ -888,8 +876,6 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
   if (log_flag_ & kLogMessage) {
     if (UNLIKELY(this_object == main_msgq_)) {
       if (UNLIKELY(method == method_msgq_enqueueMessage_)) {
-        /* @TEMP Debugging purpose - print stack */
-
         /**
          * enqueueMessage uses elapsed time after booting
          * $ long uptimeMillis = SystemClock.uptimeMillis();
@@ -901,16 +887,13 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
 
         mirror::Object *message = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegReference(9);
         if (MessageDetail::cb_enqueueMessage(message, is_late_message)) {
-          LOG(INFO) << "Visiting stacks on enqueueMessage...";
+          LOG(INFO) << "Cause-unknown message, visiting stacks...";
           MethodStackVisitor visitor(thread);
           visitor.WalkStack(true);
           LOG(INFO) << "Visiting stacks success";
         }
         ForwardMessageStatus(kMessageTransitionEnqueued);
       }
-      // else if (UNLIKELY(method == method_msgq_next_)) {
-      //   LOG(INFO) << "MiniTrace: next() - enter";
-      // }
     }
 
     if (UNLIKELY(method->GetMiniTraceMarked() == 2 && thread == main_thread_)) {
@@ -920,7 +903,8 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
        * Analyzed bytecode with LogMethodInByteCode
        */
       mirror::Object *message = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegReference(2);
-      MessageDetail::cb_dispatchMessage_enter(message);
+      MessageDetail *detail = MessageDetail::cb_dispatchMessage_enter(message);
+      LogMessage(thread, detail);
     }
 
     if (UNLIKELY(method == method_Message_recycleUnchecked_)) {
@@ -928,8 +912,13 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
     }
 
     if (UNLIKELY(method == method_Binder_execTransact_)) {
-      LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " execTransact entered";
-      PrintArgumentOnCurrentFrame(method);
+      JNIEnvExt *env = thread->GetJniEnv();
+      ScopedObjectAccessUnchecked soa(env);
+      jstring jstr_descriptor = soa.AddLocalReference<jstring>(field_Binder_mDescriptor_->GetObject(this_object));
+      const char *descriptor = env->GetStringUTFChars(jstr_descriptor, 0);
+      std::string result = ArgumentsOnCurrentFrame(method);
+      LOG(INFO) << result << " desc:" << std::string(descriptor);
+      env->ReleaseStringUTFChars(jstr_descriptor, descriptor);
     }
   }
 
@@ -939,20 +928,16 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
     ScopedLocalRef<jobject> binderProxy(env, env->NewLocalRef(this_object));
     ScopedLocalRef<jobject> interfaceDescriptor_(env,
         env->CallObjectMethod(binderProxy.get(), soa.EncodeMethod(method_BinderProxy_getInterfaceDescriptor_)));
-    const char* string = env->GetStringUTFChars((jstring) interfaceDescriptor_.get(), 0);
-
-    LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " transact entered " << string;
-
-    env->ReleaseStringUTFChars((jstring) interfaceDescriptor_.get(), string);
-    PrintArgumentOnCurrentFrame(method);
+    const char* descriptor = env->GetStringUTFChars((jstring) interfaceDescriptor_.get(), 0);
+    std::string result = ArgumentsOnCurrentFrame(method);
+    LOG(INFO) << result << " desc:" << std::string(descriptor);
+    env->ReleaseStringUTFChars((jstring) interfaceDescriptor_.get(), descriptor);
   }
   if (UNLIKELY(method == method_InputEventReceiver_dispatchInputEvent_)) {
-    LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " dispatchInputEvent entered";
-    PrintArgumentOnCurrentFrame(method);
+    LOG(INFO) << ArgumentsOnCurrentFrame(method);
   }
   if (UNLIKELY(method == method_InputEventReceiver_finishInputEvent_)) {
-    LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " finishInputEvent entered";
-    PrintArgumentOnCurrentFrame(method);
+    LOG(INFO) << ArgumentsOnCurrentFrame(method);
   }
 }
 
@@ -963,8 +948,6 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
     LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodExited);
 
   if (log_flag_ & kLogMessage) {
-    if (UNLIKELY(method_msgq_next_ == method && this_object == main_msgq_))
-      LogMessage(thread, return_value);
     if (UNLIKELY(method->GetMiniTraceMarked() == 2 && thread == main_thread_)) {
       // someHandler.DispatchMessage(Message msg)
       MessageDetail::cb_dispatchMessage_exit();
@@ -994,6 +977,7 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
 
 void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
                          mirror::ArtMethod* method, uint32_t dex_pc) {
+  /* @TODO methods on exiting... */
   LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodUnwind);
 }
 
@@ -1017,33 +1001,21 @@ void MiniTrace::ExceptionCaught(Thread* thread, const ThrowLocation& throw_locat
   delete buf;
 }
 
-void MiniTrace::LogMessage(Thread* thread, const JValue& message) {
+void MiniTrace::LogMessage(Thread* thread, MessageDetail *msg_detail) {
+  if (msg_detail == NULL)
+    return;
   ringbuf_worker_t *ringbuf_worker = GetRingBufWorker();
   if (ringbuf_worker == NULL)
     return;
 
-  JNIEnvExt *env = thread->GetJniEnv();
-  ScopedObjectAccessUnchecked soa(Thread::Current());
-  MiniTraceThreadFlag orig_flag = thread->GetMiniTraceFlag();
-  thread->SetMiniTraceFlag(kMiniTraceExclude);
-
-  ScopedLocalRef<jobject> jmessage(env, env->NewLocalRef(message.GetL()));
-  ScopedLocalRef<jobject> message_string(env,
-      env->CallObjectMethod(jmessage.get(), soa.EncodeMethod(method_Message_toString_)));
-  const char* message_cstring = env->GetStringUTFChars((jstring) message_string.get(), 0);
-
-  LOG(INFO) << "MiniTrace: " << message_cstring;
-
-  int32_t length = strlen(message_cstring);
-  int32_t record_size = length + 2 + 4 + 1;
+  // Record detail information for message
+  std::string dumped = msg_detail->Dump();
+  int32_t record_size = dumped.length() + 2 + 4 + 1;
   char *buf = new char[record_size]();
   Append2LE(buf, thread->GetTid());
   Append4LE(buf + 2, (record_size << 3) | kMiniTraceMessageEvent);
-  strcpy(buf + 6, message_cstring);
-
-  env->ReleaseStringUTFChars((jstring) message_string.get(), message_cstring);
+  strcpy(buf + 6, dumped.c_str());
   WriteRingBuffer(ringbuf_worker, buf, record_size);
-  thread->SetMiniTraceFlag(orig_flag);
   delete buf;
 }
 
@@ -1051,23 +1023,21 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
 #ifdef HAVE_ANDROID_OS
   class MiniMessageHandler : public android::MessageHandler {
   public:
-      virtual void handleMessage(const android::Message& message) {
-        LOG(INFO) << "MessageStatus: message handled";
-      }
+      virtual void handleMessage(const android::Message& message) {}
   };
   static mirror::Object *main_MessageQueue;
   static jmethodID method_addIdleHandler;
   static android::sp<MiniMessageHandler> nativeLooperMessageHandler;
-  // static android::sp<android::Looper> mLooper;
+  static char buf[10];
 
   Thread *self = Thread::Current();
   JNIEnv *env = self->GetJniEnv();
-  MiniTraceThreadFlag orig_flag = self->GetMiniTraceFlag();
-  self->SetMiniTraceFlag(kMiniTraceExclude);
   MutexLock mu(self, *message_status_lock_);
   {
     if (m_idler_ == NULL) {
-      /* First time */
+      /* First time initialize objects */
+      MiniTraceThreadFlag orig_flag = self->GetMiniTraceFlag();
+      self->SetMiniTraceFlag(kMiniTraceExclude);
       ScopedLocalRef<jclass> looperClass(env, env->FindClass("android/os/Looper"));
       ScopedLocalRef<jclass> msgqClass(env, env->FindClass("android/os/MessageQueue"));
       ScopedLocalRef<jclass> idlerClass(env, env->FindClass("android/app/Instrumentation$Idler"));
@@ -1084,13 +1054,15 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
       jobject j_main_msgq = env->NewGlobalRef(env->CallObjectMethod(mainLooper.get(), getQueue));
       m_idler_ = self->DecodeJObject(j_idler);
       main_MessageQueue = self->DecodeJObject(j_main_msgq);
-      // mLooper = android::Looper::getForThread();
+      self->SetMiniTraceFlag(orig_flag);
+
+      Append2LE(buf, 0);  // tid = 0
     }
   }
   switch (message_status_) {
     case kMessageInitial:
       if (transition == kMessageTransitionEnqueued) {
-        LOG(INFO) << "MessageStatus: Initial -> Enqueued";
+        LOG(INFO) << "MessageStatus: Initial -> Enqueued, invoking addIdleHandler";
         goto run_add_idle;
       }
       break;
@@ -1102,27 +1074,37 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
       break;
     case kMessageIdled:
       if (transition == kMessageTransitionNativePollOnceEntered) {
-        if (MessageDetail::NoMoreMessage()) {
+        if (MessageDetail::HasNoMoreMessage()) {
           // Looper::sendMessage
           message_status_ = kMessageLooperMessageSent;
-          LOG(INFO) << "MessageStatus: Idled -> send messages... -> LooperMessageSent";
+          LOG(INFO) << "MessageStatus: Idled -> LooperMessageSent, sending looper message";
           if (nativeLooperMessageHandler == NULL)
             nativeLooperMessageHandler = new MiniMessageHandler();
           android::Message msg(0);
           android::Looper::getForThread()->sendMessage(nativeLooperMessageHandler, msg);
         } else {
-          LOG(INFO) << "MessageStatus: Idled -> some messages... -> Enqueued";
+          LOG(INFO) << "MessageStatus: Idled -> Enqueued, invoking addIdleHandler";
           goto run_add_idle;
         }
       }
       break;
     case kMessageLooperMessageSent:
       if (transition == kMessageTransitionNativePollOnceExited) {
-        if (MessageDetail::NoMoreMessage()) {
-          LOG(INFO) << "MessageStatus: Real Idle!";
+        if (MessageDetail::HasNoMoreMessageThenFlushOut()) {
+          LOG(INFO) << "MessageStatus: Successfully idle found!";
           message_status_ = kMessageInitial;
+          uint64_t timestamp;
+          {
+            timeval now;
+            gettimeofday(&now, NULL);
+            timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
+          }
+          Append8LE(buf+2, timestamp);
+          ringbuf_worker_t *ringbuf_worker = GetRingBufWorker();
+          CHECK(ringbuf_worker);
+          WriteRingBuffer(ringbuf_worker, buf, 10);
         } else {
-          LOG(INFO) << "MessageStatus: some messages...";
+          LOG(INFO) << "MessageStatus: LooperMessageSent -> Enqueued, invoking addIdleHandler";
           goto run_add_idle;
         }
       }
@@ -1131,14 +1113,17 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
   if (false) {
    run_add_idle:
     message_status_ = kMessageEnqueued;
-    LOG(INFO) << "MessageStatus: addIdleHandler...";
-    ScopedObjectAccessUnchecked soa(env);
 
+    MiniTraceThreadFlag orig_flag = self->GetMiniTraceFlag();
+    self->SetMiniTraceFlag(kMiniTraceExclude);
+
+    ScopedObjectAccessUnchecked soa(env);
     ScopedLocalRef<jobject> j_idler(env, soa.AddLocalReference<jobject>(m_idler_));
     ScopedLocalRef<jobject> j_main_msgq(env, soa.AddLocalReference<jobject>(main_MessageQueue));
     env->CallVoidMethod(j_main_msgq.get(), method_addIdleHandler, j_idler.get());
+
+    self->SetMiniTraceFlag(orig_flag);
   }
-  self->SetMiniTraceFlag(orig_flag);
 #endif
 }
 
@@ -1259,15 +1244,11 @@ uint16_t MiniTrace::LogNewField(mirror::ArtField *field) {
   Thread *self = Thread::Current();
   MutexLock mu(self, *traced_field_lock_);
   auto it = visited_fields_.emplace(field);
-  // std::set<ArtFieldDetail>::iterator it2 = it.first;
-  // ArtFieldDetail fieldDetail = *it2;
-  // std::set<ArtFieldDetail>::iterator it2 = it.first;
   const ArtFieldDetail *fieldDetail = &(*(it.first));
   if (it.second) {
     fields_not_stored_.push_back(fieldDetail);
     return 0;
   } else {
-    // ArtFieldDetail fieldDetail = *(it.first);
     return fieldDetail->FindIdx(field);
   }
 }
@@ -1447,7 +1428,9 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass, const char *descriptor) {
 
   if (method_Binder_execTransact_ == NULL && strcmp(descriptor, "Landroid/os/Binder;") == 0) {
     method_Binder_execTransact_ = klass->FindDeclaredDirectMethod("execTransact", "(IJJI)Z");
+    field_Binder_mDescriptor_ = klass->FindDeclaredInstanceField("mDescriptor", "Ljava/lang/String;");
     CHECK(method_Binder_execTransact_);
+    CHECK(field_Binder_mDescriptor_);
   }
 
   if (method_BinderProxy_transact_ == NULL && strcmp(descriptor, "Landroid/os/BinderProxy;") == 0) {

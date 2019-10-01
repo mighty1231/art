@@ -54,6 +54,9 @@ namespace mirror {
 
 class Thread;
 
+void StringAppendArgumentValues(std::string *string_p, mirror::ArtMethod *method, ShadowFrame *shadow_frame)
+    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
 class MiniTrace : public instrumentation::InstrumentationListener {
  public:
   enum MiniTraceFlag {
@@ -270,7 +273,11 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   /* Wrapper for android/os/Message */
   class MessageDetail {
    public:
-    /* Logged if MessageQueue is the main MessageQueue */
+    /**
+     * Logged if MessageQueue is the main MessageQueue
+     * Note: Every message enqueued do not need to be dispatched.
+     *       Some messages are not dispatched by calling removeMessages.
+     */
     static bool cb_enqueueMessage(mirror::Object *message, bool late) {
       Thread *self = Thread::Current();
       {
@@ -303,10 +310,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       }
     }
     /* cause is logged for anytime */
-    static void cb_dispatchMessage_enter(mirror::Object *message) {
+    static MessageDetail *cb_dispatchMessage_enter(mirror::Object *message) {
       Thread *self = Thread::Current();
       MutexLock mu(self, *lock);
-      LOG(INFO) << "MessageDetail: dispatchMessage " << message;
       auto lm = last_messages_.find(message);
       CHECK(lm != last_messages_.end()) << "Dispatching message have been never seen??\n" << MessageDetail::DumpAll(false);
       MessageDetail *last_message = lm->second;
@@ -319,53 +325,45 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         vec.push_back(last_message);
         thread_to_msgstack_[self] = vec;
       }
-      // LOG(INFO) << MessageDetail::DumpAll(false);
+      return last_message;
     }
     static void cb_dispatchMessage_exit() {
       Thread *self = Thread::Current();
       MutexLock mu(self, *lock);
-      LOG(INFO) << "MessageDetail: dispatchMessage exit";
       thread_to_msgstack_[self].pop_back();
     }
 
     static void cb_Message_recycleUnchecked(mirror::Object *message) {
       Thread *self = Thread::Current();
-      LOG(INFO) << "MessageDetail: recycleUnchecked " << message;
       MutexLock mu(self, *lock);
       auto lm = last_messages_.find(message);
-      // The message would be enqueued with MessageQueue.enqueueSyncBarrier
       if (lm != last_messages_.end()) {
+        if (lm->second)
+          LOG(INFO) << "Message recycled " << (lm->second)->Dump();
         lm->second = NULL;
       } else {
         // The message may be enqueued with MessageQueue.enqueueSyncBarrier
         // LOG(INFO) << << "Recycling message have been never seen??" << MessageDetail::DumpAll(false);
       }
-
-      /* For debugging purpose, check remaining messages */
-      int num_msg = 0;
-      for (auto const& it : last_messages_) {
-        if (it.second != NULL)
-          num_msg++;
-      }
-      LOG(INFO) << "Remaining num_msg " << num_msg;
     }
 
     MessageDetail(mirror::Object *message, bool late, Thread *self):
         message_(message), id_(cur_id_), late_(late) {
       info_.assign(message_toString(message));
-      LOG(INFO) << "Cause finding...";
       MessageCauseFinder visitor(self, &cause_);
       visitor.WalkStack(true);
-      LOG(INFO) << "Caues found!";
       cause_unknown_ = visitor.unknown_;
     }
+
     MessageDetail(mirror::Object *message, bool late, MessageDetail *cause_object):
         message_(message), id_(cur_id_),  late_(late),
-        cause_(StringPrintf("[Message id %d]", cause_object->id_)), cause_unknown_(true) {
+        cause_(StringPrintf("[Message id %d]", cause_object->id_)), cause_unknown_(false) {
       info_.assign(message_toString(message));
     }
 
-    static bool NoMoreMessage() {
+    virtual ~MessageDetail() {};
+
+    static bool HasNoMoreMessage() {
       MutexLock mu(Thread::Current(), *lock);
       for (auto const& it : last_messages_) {
         MessageDetail *detail = it.second;
@@ -376,11 +374,27 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       return true;
     }
 
+    static bool HasNoMoreMessageThenFlushOut() {
+      MutexLock mu(Thread::Current(), *lock);
+      for (auto const& it : last_messages_) {
+        MessageDetail *detail = it.second;
+        if (detail != NULL && !detail->late_) {
+          return false;
+        }
+      }
+      /* Flush out */
+      for (auto iter = messages_.begin(); iter != messages_.end(); iter++) {
+        MessageDetail *detail = (*iter);
+        delete detail;
+      }
+      messages_.clear();
+      return true;
+    }
+
     static std::string DumpAll(bool use_lock) {
-      Thread *self = Thread::Current();
       std::string ret;
       if (use_lock) {
-        MutexLock mu(self, *lock);
+        MutexLock mu(Thread::Current(), *lock);
         for (auto it = messages_.begin(); it < messages_.end(); it++) {
           MessageDetail *detail = (*it);
           ret.append(StringPrintf("%p %s\n", detail, detail->Dump().c_str()));
@@ -398,6 +412,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       return StringPrintf("[id %d] %p %s /r %s",
         id_, message_, info_.c_str(), cause_.c_str());
     }
+
     static Mutex *lock;
 
    private:
@@ -413,9 +428,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         mirror::ArtMethod *method = GetMethod();
         if (method == NULL)
           return true;
-        LOG(INFO) << "Visiting method " << method;
         if (method == method_Binder_execTransact_) {
-          LOG(INFO) << "execTransact";
           cause_p->assign(StringPrintf("[Thread %s(%d) - execTransact",
               tname_.c_str(), tid_));
           RecordArgumentValues();
@@ -423,7 +436,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
           unknown_ = false;
           return false;
         } else if (method == method_InputEventReceiver_dispatchInputEvent_) {
-          LOG(INFO) << "dispatchInput";
           cause_p->assign(StringPrintf("[Thread %s(%d) - dispatchInput",
               tname_.c_str(), tid_));
           RecordArgumentValues();
@@ -431,13 +443,11 @@ class MiniTrace : public instrumentation::InstrumentationListener {
           unknown_ = false;
           return false;
         } else if (method == method_msgq_nativePollOnce_) {
-          LOG(INFO) << "nativePollOnce" << last_method_ << " / " << last_shadow_frame_;
           cause_p->assign(StringPrintf("[Thread %s(%d) - nativePollOnce/%s",
               tname_.c_str(), tid_, last_method_->GetName()));
-          RecordArgumentValues(last_method_, last_shadow_frame_);
-          LOG(INFO) << "nativePollOnce success";
+          StringAppendArgumentValues(cause_p, last_method_, last_shadow_frame_);
           cause_p->append("]");
-          unknown_ = false;
+          // unknown_ = false;
           return false;
         }
         // For nativePollOnce, store the last method
@@ -450,57 +460,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
       void RecordArgumentValues()
           SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-        RecordArgumentValues(GetMethod(), GetCurrentShadowFrame());
+        StringAppendArgumentValues(cause_p, GetMethod(), GetCurrentShadowFrame());
       }
 
-      void RecordArgumentValues(mirror::ArtMethod *method, ShadowFrame *shadow_frame)
-          SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-        CHECK(!method->IsAbstract());
-        const DexFile::CodeItem* code_item = method->GetCodeItem();
-        uint16_t num_regs;
-        uint16_t num_ins;
-        if (code_item != NULL) {
-          num_regs =  code_item->registers_size_;
-          num_ins = code_item->ins_size_;
-        } else {
-          DCHECK(method->IsNative());
-          num_regs = num_ins = mirror::ArtMethod::NumArgRegisters(method->GetShorty());
-          if (!method->IsStatic()) {
-            num_regs++;
-            num_ins++;
-          }
-        }
-
-        size_t cur_reg = num_regs - num_ins;
-        if (!method->IsStatic()) {
-          mirror::Object *receiver = shadow_frame->GetVRegReference(cur_reg);
-          StringAppendF(cause_p, " %zu/this:%p", cur_reg, receiver);
-          ++cur_reg;
-        }
-        uint32_t shorty_len = 0;
-        const char* shorty = method->GetShorty(&shorty_len);
-        for (size_t shorty_pos = 0, arg_pos = 0; cur_reg < num_regs; ++shorty_pos, ++arg_pos, cur_reg++) {
-          DCHECK_LT(shorty_pos + 1, shorty_len);
-          switch (shorty[shorty_pos + 1]) {
-            case 'L': {
-              StringAppendF(cause_p, " %zu/%c:%p", cur_reg, shorty[shorty_pos+1],
-                  shadow_frame->GetVRegReference(cur_reg));
-              break;
-            }
-            case 'J': case 'D': {
-              StringAppendF(cause_p, " %zu/%c:%" PRId64, cur_reg, shorty[shorty_pos+1],
-                  shadow_frame->GetVRegLong(cur_reg));
-              cur_reg++;
-              arg_pos++;
-              break;
-            }
-            default:
-              StringAppendF(cause_p, " %zu/%c:%d", cur_reg, shorty[shorty_pos+1],
-                  shadow_frame->GetVReg(cur_reg));
-              break;
-          }
-        }
-      }
       pid_t tid_;
       std::string tname_;
       std::string *cause_p;  // output value for VisitFrame
@@ -565,7 +527,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
                            bool enter_event)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  void LogMessage(Thread* thread, const JValue& msg) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void LogMessage(Thread* thread, MessageDetail *message) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   void DumpMethod(std::string &buffer);
   void DumpField(std::string &buffer);
@@ -578,7 +540,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   void ReadBuffer(char *dest, size_t offset, size_t len);
   void WriteRingBuffer(ringbuf_worker_t *worker, const char *src, size_t len);
 
-  void ForwardMessageStatus(MessageStatusTransition transition) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void ForwardMessageStatus(MessageStatusTransition transition);
 
   static void new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass clazz,
         jlong ptr, jint timeoutMillis);
@@ -674,6 +636,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   static mirror::ArtMethod *method_Message_recycleUnchecked_;
   static mirror::ArtMethod *method_Message_toString_;
   static mirror::ArtMethod *method_Binder_execTransact_;
+  static mirror::ArtField *field_Binder_mDescriptor_;
   static mirror::ArtMethod *method_BinderProxy_transact_;
   static mirror::ArtMethod *method_BinderProxy_getInterfaceDescriptor_;
   static mirror::ArtMethod *method_InputEventReceiver_dispatchInputEvent_;
@@ -684,9 +647,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   /* Used for idle checking */
   int ape_socket_fd_;
-  mirror::Object *main_MessageQueue_;
   mirror::Object *m_idler_;
-  static jmethodID method_addIdleHandler;
 
   // Push simple log for every 1 second
   pthread_t pinging_thread_;
