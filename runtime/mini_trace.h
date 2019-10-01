@@ -353,8 +353,10 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     MessageDetail(mirror::Object *message, bool late, Thread *self):
         message_(message), id_(cur_id_), late_(late) {
       info_.assign(message_toString(message));
+      LOG(INFO) << "Cause finding...";
       MessageCauseFinder visitor(self, &cause_);
       visitor.WalkStack(true);
+      LOG(INFO) << "Caues found!";
       cause_unknown_ = visitor.unknown_;
     }
     MessageDetail(mirror::Object *message, bool late, MessageDetail *cause_object):
@@ -400,34 +402,41 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
    private:
     struct MessageCauseFinder : public StackVisitor {
-      explicit MessageCauseFinder(Thread* thread, std::string *cause)
-          : StackVisitor(thread, NULL), tid_(thread->GetTid()), cause_(cause),
+      explicit MessageCauseFinder(Thread* thread, std::string *cause_ptr)
+          : StackVisitor(thread, NULL), tid_(thread->GetTid()), cause_p(cause_ptr),
             unknown_(true), last_method_(NULL), last_shadow_frame_(NULL) {
         thread->GetThreadName(tname_);
-        cause->assign(StringPrintf("[Thread %s(%d)]", tname_.c_str(), tid_));
+        cause_ptr->assign(StringPrintf("[Thread %s(%d)]", tname_.c_str(), tid_));
       }
 
       bool VisitFrame() OVERRIDE SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
         mirror::ArtMethod *method = GetMethod();
+        if (method == NULL)
+          return true;
+        LOG(INFO) << "Visiting method " << method;
         if (method == method_Binder_execTransact_) {
-          cause_->assign(StringPrintf("[Thread %s(%d) - execTransact",
+          LOG(INFO) << "execTransact";
+          cause_p->assign(StringPrintf("[Thread %s(%d) - execTransact",
               tname_.c_str(), tid_));
           RecordArgumentValues();
-          cause_->append("]");
+          cause_p->append("]");
           unknown_ = false;
           return false;
         } else if (method == method_InputEventReceiver_dispatchInputEvent_) {
-          cause_->assign(StringPrintf("[Thread %s(%d) - dispatchInput",
+          LOG(INFO) << "dispatchInput";
+          cause_p->assign(StringPrintf("[Thread %s(%d) - dispatchInput",
               tname_.c_str(), tid_));
           RecordArgumentValues();
-          cause_->append("]");
+          cause_p->append("]");
           unknown_ = false;
           return false;
         } else if (method == method_msgq_nativePollOnce_) {
-          cause_->assign(StringPrintf("[Thread %s(%d) - nativePollOnce/%s",
+          LOG(INFO) << "nativePollOnce" << last_method_ << " / " << last_shadow_frame_;
+          cause_p->assign(StringPrintf("[Thread %s(%d) - nativePollOnce/%s",
               tname_.c_str(), tid_, last_method_->GetName()));
           RecordArgumentValues(last_method_, last_shadow_frame_);
-          cause_->append("]");
+          LOG(INFO) << "nativePollOnce success";
+          cause_p->append("]");
           unknown_ = false;
           return false;
         }
@@ -465,7 +474,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         size_t cur_reg = num_regs - num_ins;
         if (!method->IsStatic()) {
           mirror::Object *receiver = shadow_frame->GetVRegReference(cur_reg);
-          StringAppendF(cause_, " %zu/this:%p", cur_reg, receiver);
+          StringAppendF(cause_p, " %zu/this:%p", cur_reg, receiver);
           ++cur_reg;
         }
         uint32_t shorty_len = 0;
@@ -474,19 +483,19 @@ class MiniTrace : public instrumentation::InstrumentationListener {
           DCHECK_LT(shorty_pos + 1, shorty_len);
           switch (shorty[shorty_pos + 1]) {
             case 'L': {
-              StringAppendF(cause_, " %zu/%c:%p", cur_reg, shorty[shorty_pos+1],
+              StringAppendF(cause_p, " %zu/%c:%p", cur_reg, shorty[shorty_pos+1],
                   shadow_frame->GetVRegReference(cur_reg));
               break;
             }
             case 'J': case 'D': {
-              StringAppendF(cause_, " %zu/%c:%" PRId64, cur_reg, shorty[shorty_pos+1],
+              StringAppendF(cause_p, " %zu/%c:%" PRId64, cur_reg, shorty[shorty_pos+1],
                   shadow_frame->GetVRegLong(cur_reg));
               cur_reg++;
               arg_pos++;
               break;
             }
             default:
-              StringAppendF(cause_, " %zu/%c:%d", cur_reg, shorty[shorty_pos+1],
+              StringAppendF(cause_p, " %zu/%c:%d", cur_reg, shorty[shorty_pos+1],
                   shadow_frame->GetVReg(cur_reg));
               break;
           }
@@ -494,7 +503,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       }
       pid_t tid_;
       std::string tname_;
-      std::string *cause_;  // output value for VisitFrame
+      std::string *cause_p;  // output value for VisitFrame
       bool unknown_;
 
       /* For nativePollOnce-caused messages */

@@ -901,8 +901,10 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
 
         mirror::Object *message = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegReference(9);
         if (MessageDetail::cb_enqueueMessage(message, is_late_message)) {
+          LOG(INFO) << "Visiting stacks on enqueueMessage...";
           MethodStackVisitor visitor(thread);
           visitor.WalkStack(true);
+          LOG(INFO) << "Visiting stacks success";
         }
         ForwardMessageStatus(kMessageTransitionEnqueued);
       }
@@ -1056,7 +1058,7 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
   static mirror::Object *main_MessageQueue;
   static jmethodID method_addIdleHandler;
   static android::sp<MiniMessageHandler> nativeLooperMessageHandler;
-  static android::sp<android::Looper> mLooper;
+  // static android::sp<android::Looper> mLooper;
 
   Thread *self = Thread::Current();
   JNIEnv *env = self->GetJniEnv();
@@ -1082,8 +1084,7 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
       jobject j_main_msgq = env->NewGlobalRef(env->CallObjectMethod(mainLooper.get(), getQueue));
       m_idler_ = self->DecodeJObject(j_idler);
       main_MessageQueue = self->DecodeJObject(j_main_msgq);
-      nativeLooperMessageHandler = new MiniMessageHandler();
-      mLooper = android::Looper::getForThread();
+      // mLooper = android::Looper::getForThread();
     }
   }
   switch (message_status_) {
@@ -1095,6 +1096,7 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
       break;
     case kMessageEnqueued:
       if (transition == kMessageTransitionQueueIdleExited) {
+        LOG(INFO) << "MessageStatus: Enqueued -> Idled";
         message_status_ = kMessageIdled;
       }
       break;
@@ -1103,8 +1105,11 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
         if (MessageDetail::NoMoreMessage()) {
           // Looper::sendMessage
           message_status_ = kMessageLooperMessageSent;
-          mLooper->sendMessage(nativeLooperMessageHandler, android::Message(0));
           LOG(INFO) << "MessageStatus: Idled -> send messages... -> LooperMessageSent";
+          if (nativeLooperMessageHandler == NULL)
+            nativeLooperMessageHandler = new MiniMessageHandler();
+          android::Message msg(0);
+          android::Looper::getForThread()->sendMessage(nativeLooperMessageHandler, msg);
         } else {
           LOG(INFO) << "MessageStatus: Idled -> some messages... -> Enqueued";
           goto run_add_idle;
