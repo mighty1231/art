@@ -45,7 +45,10 @@
 #include "ringbuf.h"
 #include "dex_instruction.h"
 #include <utils/Timers.h>
+
+#ifdef HAVE_ANDROID_OS
 #include <utils/Looper.h>
+#endif
 
 namespace art {
 
@@ -113,7 +116,7 @@ enum MiniTraceAction {
 
 static const uint16_t kMiniTraceHeaderLength     = 4+2+2+4+8;
 static const uint16_t kMiniTraceVersion          = 2;
-static const uint32_t kMiniTraceMagic            = 0x7254694D; // MiTr
+static const uint32_t kMiniTraceMagic            = 0x7254694D;  // MiTr
 void *MiniTrace::nativePollOnce_originalEntry = NULL;
 int MiniTrace::MessageDetail::cur_id_ = 0;
 std::map<Thread *, std::vector<MiniTrace::MessageDetail*>> MiniTrace::MessageDetail::thread_to_msgstack_;
@@ -146,15 +149,15 @@ const char *MiniTrace::threadnames_to_exclude[] = {
 #if _BYTE_ORDER == _LITTLE_ENDIAN
 
 static void Append2LE(char* buf, uint16_t val) {
-  *(uint16_t *)buf = val;
+  *reinterpret_cast<uint16_t *>(buf) = val;
 }
 
 static void Append4LE(char* buf, uint32_t val) {
-  *(uint32_t *)buf = val;
+  *reinterpret_cast<uint32_t *>(buf) = val;
 }
 
 static void Append8LE(char* buf, uint64_t val) {
-  *(uint64_t *)buf = val;
+  *reinterpret_cast<uint64_t *>(buf) = val;
 }
 
 #else /* _BYTE_ORDER == _BIG_ENDIAN */
@@ -185,7 +188,7 @@ static void Append8LE(char* buf, uint64_t val) {
 
 #endif /* _BYTE_ORDER */
 
-static int read_with_timeout (int socket_fd, void *buf, int size, int timeout_sec) {
+static int read_with_timeout(int socket_fd, void *buf, int size, int timeout_sec) {
   int total_written = 0;
   int written;
   if (timeout_sec <= 0 || timeout_sec > 10) {
@@ -194,7 +197,7 @@ static int read_with_timeout (int socket_fd, void *buf, int size, int timeout_se
   uint32_t run_until = (uint32_t) time(NULL) + timeout_sec;
   int attempt = 0;
   while (total_written < size) {
-    written = read(socket_fd, (char *) buf + total_written, size - total_written);
+    written = read(socket_fd, reinterpret_cast<char *>(buf) + total_written, size - total_written);
     attempt++;
 
     if ((uint32_t) time(NULL) >= run_until)
@@ -220,7 +223,7 @@ static int CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid, uint32_t *log_
   strcpy(&server_addr.sun_path[1], "/dev/mt/server");
   int addrlen = sizeof server_addr.sun_family + strlen(&server_addr.sun_path[1]) + 1;
 
-  if (connect(socket_fd, (sockaddr *)&server_addr, addrlen) < 0) {
+  if (connect(socket_fd, reinterpret_cast<sockaddr *>(&server_addr), addrlen) < 0) {
     if (errno != 111)
       PLOG(ERROR) << "MiniTrace: connect " << errno;
     close(socket_fd);
@@ -230,8 +233,8 @@ static int CreateSocketAndCheckUIDAndPrefix(void *buf, uid_t uid, uint32_t *log_
 
   uid_t targetuid;
   int32_t prefix_length;
-  int written = read_with_timeout(socket_fd, &targetuid, sizeof (uid_t), 3);
-  if (written == sizeof (uid_t)) {
+  int written = read_with_timeout(socket_fd, &targetuid, sizeof(uid_t), 3);
+  if (written == sizeof(uid_t)) {
     // check uid
     LOG(INFO) << "MiniTrace: read success, written " << written << " targetuid " << targetuid << " uid " << (uid&0xFFFF);
     if (targetuid == uid) {
@@ -280,7 +283,7 @@ static int CreateSocketAndCheckAPE() {
   strcpy(&server_addr.sun_path[1], "/dev/mt/ape");
   int addrlen = sizeof server_addr.sun_family + strlen(&server_addr.sun_path[1]) + 1;
 
-  if (connect(socket_fd, (sockaddr *)&server_addr, addrlen) < 0) {
+  if (connect(socket_fd, reinterpret_cast<sockaddr *>(&server_addr), addrlen) < 0) {
     PLOG(ERROR) << "MiniTrace::IdleCheck: connect " << errno;
     close(socket_fd);
     return -1;
@@ -293,7 +296,7 @@ static int CreateSocketAndCheckAPE() {
 //   const DexFile::CodeItem* code_item = method->GetCodeItem();
 //   const Instruction* inst;
 //   int dex_pc = 0;
-//   for (int i=0; i<300; i++) {
+//   for (int i = 0; i < 300; i++) {
 //     inst = Instruction::At(code_item->insns_ + dex_pc);
 //     LOG(INFO) << "method" << i << ": " << inst->DumpString(method->GetDexFile());
 //     dex_pc += inst->SizeInCodeUnits();
@@ -393,7 +396,7 @@ void MiniTrace::Start() {
   uint32_t log_flag;
   {
     MutexLock mu(self, *Locks::trace_lock_);
-    if (the_trace_ != NULL) // Already started
+    if (the_trace_ != NULL)  // Already started
       return;
 
     int socket_fd = CreateSocketAndCheckUIDAndPrefix(prefix, uid, &log_flag);
@@ -402,7 +405,7 @@ void MiniTrace::Start() {
     LOG(INFO) << "MiniTrace: connection success, received prefix="
         << prefix << " log_flag=" << log_flag;
 
-    CHECK((log_flag & ~kFlagAll) == 0);
+    CHECK(!(log_flag & ~kFlagAll));
     CHECK(!(log_flag & (kDoMethodEntered | kDoMethodExited | kDoMethodUnwind))
       || (log_flag & kLogMethodTypeFlags));
     CHECK(!(log_flag & (kDoFieldRead | kDoFieldWritten))
@@ -414,7 +417,7 @@ void MiniTrace::Start() {
     int ape_socket_fd = -1;
     if (log_flag & kConnectAPE) {
       ape_socket_fd = CreateSocketAndCheckAPE();
-      CHECK(ape_socket_fd != -1);
+      CHECK_NE(ape_socket_fd, -1);
     }
 
     // RedirectnativePollOnce
@@ -426,7 +429,7 @@ void MiniTrace::Start() {
     CHECK(method_msgq_nativePollOnce_ == method_nativePollOnce);
     CHECK(method_nativePollOnce);
     nativePollOnce_originalEntry = method_nativePollOnce->GetEntryPointFromJni();
-    method_nativePollOnce->SetEntryPointFromJni((void* )&new_android_os_MessageQueue_nativePollOnce);
+    method_nativePollOnce->SetEntryPointFromJni(reinterpret_cast<void *>(&new_android_os_MessageQueue_nativePollOnce));
     if (log_flag & kLogMessage) {
       MessageDetail::lock = new Mutex("MiniTrace MessageDetail lock");
     }
@@ -457,9 +460,9 @@ void MiniTrace::Shutdown() {
   {
     // This block prevents more than one invocation for MiniTrace::Shutdown
     MutexLock mu(Thread::Current(), *Locks::trace_lock_);
-    if (the_trace_ == NULL)
+    if (the_trace_ == NULL) {
       return;
-    else {
+    } else {
       the_trace = the_trace_;
       the_trace_ = NULL;
     }
@@ -510,16 +513,16 @@ void MiniTrace::Checkout() {
     MutexLock mu(self, *Locks::trace_lock_);
     the_trace = the_trace_;
   }
-  if (the_trace == NULL)
+  if (the_trace == NULL) {
     Start();
-  else {
+  } else {
     LOG(INFO) << "MiniTrace: Checkout called";
-    the_trace->data_bin_index_ ++;
+    the_trace->data_bin_index_++;
   }
 }
 
 void *MiniTrace::ConsumerTask(void *arg) {
-  MiniTrace *the_trace = (MiniTrace *)arg;
+  MiniTrace *the_trace = reinterpret_cast<MiniTrace *>(arg);
   Runtime* runtime = Runtime::Current();
   CHECK(runtime->AttachCurrentThread("Consumer", true, runtime->GetSystemThreadGroup(),
                                        !runtime->IsCompiler()));
@@ -586,8 +589,8 @@ void *MiniTrace::ConsumerTask(void *arg) {
       // If data_bin_index_ is modified, flush previous data and create a new file
       if (last_bin_index != the_trace->data_bin_index_) {
         // release and send its filename to socket
-        CHECK(trace_data_file_->Flush() == 0);
-        CHECK(trace_data_file_->Close() == 0);
+        CHECK(!trace_data_file_->Flush());
+        CHECK(!trace_data_file_->Close());
         write(the_trace->socket_fd_, trace_data_filename.c_str(), trace_data_filename.length() + 1);
         last_bin_index = the_trace->data_bin_index_;
         trace_data_filename.assign(StringPrintf("%sdata_%d.bin",
@@ -681,14 +684,14 @@ void *MiniTrace::ConsumerTask(void *arg) {
 
   delete databuf;
   delete header;
-  CHECK(trace_data_file_->Flush() == 0);
-  CHECK(trace_data_file_->Close() == 0);
-  CHECK(trace_method_info_file_->Flush() == 0);
-  CHECK(trace_method_info_file_->Close() == 0);
-  CHECK(trace_field_info_file_->Flush() == 0);
-  CHECK(trace_field_info_file_->Close() == 0);
-  CHECK(trace_thread_info_file_->Flush() == 0);
-  CHECK(trace_thread_info_file_->Close() == 0);
+  CHECK(!trace_data_file_->Flush());
+  CHECK(!trace_data_file_->Close());
+  CHECK(!trace_method_info_file_->Flush());
+  CHECK(!trace_method_info_file_->Close());
+  CHECK(!trace_field_info_file_->Flush());
+  CHECK(!trace_field_info_file_->Close());
+  CHECK(!trace_thread_info_file_->Flush());
+  CHECK(!trace_thread_info_file_->Close());
 
   write(the_trace->socket_fd_, trace_method_info_filename.c_str(),
       trace_method_info_filename.length() + 1);
@@ -703,7 +706,7 @@ void *MiniTrace::ConsumerTask(void *arg) {
 }
 
 void *MiniTrace::PingingTask(void *arg) {
-  MiniTrace *the_trace = (MiniTrace *)arg;
+  MiniTrace *the_trace = reinterpret_cast<MiniTrace *>(arg);
   Runtime* runtime = Runtime::Current();
   CHECK(runtime->AttachCurrentThread("Pinging", true, runtime->GetSystemThreadGroup(),
                                        !runtime->IsCompiler()));
@@ -716,7 +719,7 @@ void *MiniTrace::PingingTask(void *arg) {
   ringbuf_worker_t *ringbuf_worker = NULL;
   {
     MutexLock mu(self, *the_trace->wids_registered_lock_);
-    for (size_t i=0; i<MAX_THREAD_COUNT; i++) {
+    for (size_t i = 0; i < MAX_THREAD_COUNT; i++) {
       if (the_trace->wids_registered_[i] == false) {
         ringbuf_worker = ringbuf_register(the_trace->ringbuf_, i);
         the_trace->wids_registered_[i] = true;
@@ -727,7 +730,7 @@ void *MiniTrace::PingingTask(void *arg) {
   CHECK(ringbuf_worker != NULL);
 
   char buf[10];
-  Append2LE(buf, 1); // tid = 1
+  Append2LE(buf, 1);  // tid = 1
 
   timeval now;
   uint64_t timestamp;
@@ -737,7 +740,7 @@ void *MiniTrace::PingingTask(void *arg) {
     Append8LE(buf + 2, timestamp);
     the_trace->WriteRingBuffer(ringbuf_worker, buf, 10);
 
-    usleep(1 * 1000 * 1000); // 1 second
+    usleep(1 * 1000 * 1000);  // 1 second
     LOG(INFO) << "MiniTrace: 1 sec ping!";
 
     LOG(INFO) << MessageDetail::DumpAll(true);
@@ -762,7 +765,7 @@ void MiniTrace::new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass c
     }
     main_ptr = ptr;
   }
-  if (main_ptr == ptr) { // if main MessageQueue,
+  if (main_ptr == ptr) {  // if main MessageQueue,
     LOG(INFO) << "MiniTrace: nativePollOnce(timeoutMillis = " << timeoutMillis << ") - enter";
     Locks::mutator_lock_->SharedLock(Thread::Current());
     the_trace->ForwardMessageStatus(kMessageTransitionNativePollOnceEntered);
@@ -822,10 +825,10 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
   size_t ringbuf_obj_size;
   ringbuf_get_sizes(MAX_THREAD_COUNT, &ringbuf_obj_size, NULL);
 
-  ringbuf_ = (ringbuf_t *) malloc(ringbuf_obj_size);
+  ringbuf_ = reinterpret_cast<ringbuf_t *>(malloc(ringbuf_obj_size));
   ringbuf_setup(ringbuf_, MAX_THREAD_COUNT, buffer_size);
 
-  for (size_t i=0; i<MAX_THREAD_COUNT; i++) {
+  for (size_t i = 0; i < MAX_THREAD_COUNT; i++) {
     wids_registered_[i] = false;
   }
 
@@ -1043,6 +1046,7 @@ void MiniTrace::LogMessage(Thread* thread, const JValue& message) {
 }
 
 void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
+#ifdef HAVE_ANDROID_OS
   class MiniMessageHandler : public android::MessageHandler {
   public:
       virtual void handleMessage(const android::Message& message) {
@@ -1130,6 +1134,7 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
     env->CallVoidMethod(j_main_msgq.get(), method_addIdleHandler, j_idler.get());
   }
   self->SetMiniTraceFlag(orig_flag);
+#endif
 }
 
 void MiniTrace::LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
@@ -1212,7 +1217,7 @@ void MiniTrace::DumpMethod(std::string &string) {
   Thread *self = Thread::Current();
   traced_method_lock_->AssertHeld(self);
   string.assign("");
-  for (auto& it: methods_not_stored_) {
+  for (auto& it : methods_not_stored_) {
     (&it)->Dump(string);
   }
   methods_not_stored_.clear();
@@ -1222,7 +1227,7 @@ void MiniTrace::DumpField(std::string &string) {
   Thread *self = Thread::Current();
   traced_field_lock_->AssertHeld(self);
   string.assign("");
-  for (auto it: fields_not_stored_) {
+  for (auto it : fields_not_stored_) {
     (*it).Dump(string);
   }
   fields_not_stored_.clear();
@@ -1475,7 +1480,7 @@ ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
     }
     std::string name;
     self->GetThreadName(name);
-    for (size_t i=0; i<THREAD_TO_EXCLUDE_CNT; i++) {
+    for (size_t i = 0; i < THREAD_TO_EXCLUDE_CNT; i++) {
       if (name.compare(threadnames_to_exclude[i]) == 0) {
         self->SetMiniTraceFlag(kMiniTraceExclude);
         return NULL;
@@ -1486,7 +1491,7 @@ ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
     ringbuf_worker_t *ringbuf_worker = NULL;
     {
       MutexLock mu(self, *wids_registered_lock_);
-      for (size_t i=0; i<MAX_THREAD_COUNT; i++) {
+      for (size_t i = 0; i < MAX_THREAD_COUNT; i++) {
         if (wids_registered_[i] == false) {
           ringbuf_worker = ringbuf_register(ringbuf_, i);
           wids_registered_[i] = true;
@@ -1525,7 +1530,7 @@ void MiniTrace::UnregisterThread(Thread *thread) {
     ringbuf_worker = thread->GetRingBufWorker();
 
     /* Log termination of thread */
-    Append2LE(buf, 2); // tid = 2
+    Append2LE(buf, 2);  // tid = 2
     Append4LE(buf + 2, thread->GetTid());
     LOG(INFO) << "Termination of thread... " << thread->GetTid();
     WriteRingBuffer(ringbuf_worker, buf, 6);

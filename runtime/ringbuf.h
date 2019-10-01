@@ -5,8 +5,8 @@
  * Use is subject to license terms, as specified in the LICENSE file.
  */
 
-#ifndef _RINGBUF_H_
-#define _RINGBUF_H_
+#ifndef ART_RUNTIME_RINGBUF_H_
+#define ART_RUNTIME_RINGBUF_H_
 
 #include "base/logging.h"
 
@@ -115,6 +115,6 @@ void            ringbuf_release(ringbuf_t *, size_t);
 
 size_t          ringbuf_w2i(ringbuf_t *, ringbuf_worker_t *);
 
-}
+}  // namespace art
 
-#endif  // _RINGBUF_H_
+#endif  // ART_RUNTIME_RINGBUF_H_
