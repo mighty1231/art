@@ -319,6 +319,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       if (thread_to_msgstack_.find(self) != thread_to_msgstack_.end()) {
         // already stack is constructed
         thread_to_msgstack_[self].push_back(lm->second);
+        CHECK(thread_to_msgstack_[self].size() < 2);
       } else {
         // otherwise, make a new stack
         std::vector<MessageDetail*> vec;
@@ -338,8 +339,11 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       MutexLock mu(self, *lock);
       auto lm = last_messages_.find(message);
       if (lm != last_messages_.end()) {
-        if (lm->second)
-          LOG(INFO) << "Message recycled " << (lm->second)->Dump();
+        if (lm->second) {
+          MessageDetail *detail;
+          LOG(INFO) << "Message recycled " << detail->Dump();
+          detail->late_ = false;  // Deleted later
+        }
         lm->second = NULL;
       } else {
         // The message may be enqueued with MessageQueue.enqueueSyncBarrier
@@ -382,12 +386,30 @@ class MiniTrace : public instrumentation::InstrumentationListener {
           return false;
         }
       }
+      /* Print threads to Message Stack */
+      // int cnt = 0;
+      // for (auto it = thread_to_msgstack_.begin(); it != thread_to_msgstack_.end(); it++) {
+      //   if (!(it->second).empty()) {
+      //     LOG(INFO) << "Thread not empty: " << it->first;
+      //     for (auto it2 = it->second.begin(); it2 != it->second.end(); it2++) {
+      //       MessageDetail *detail = *it2;
+      //       LOG(INFO) << detail->Dump();
+      //       cnt++;
+      //     }
+      //   }
+      // }
+      // CHECK(cnt == 0);
+
       /* Flush out */
-      for (auto iter = messages_.begin(); iter != messages_.end(); iter++) {
+      for (auto iter = messages_.begin(); iter != messages_.end();) {
         MessageDetail *detail = (*iter);
-        delete detail;
+        if (detail->late_) {
+          ++iter;
+        } else {
+          delete detail;
+          messages_.erase(iter);
+        }
       }
-      messages_.clear();
       return true;
     }
 
