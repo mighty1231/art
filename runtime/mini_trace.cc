@@ -354,16 +354,16 @@ static int CreateSocketAndCheckAPE() {
 //   }
 // }
 
-static std::string ArgumentsOnCurrentFrame(mirror::ArtMethod *method) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  Thread *self = Thread::Current();
-  std::string tname;
-  self->GetThreadName(tname);
-  std::string result = StringPrintf("[%s(%d)] %s %s",
-    tname.c_str(), self->GetTid(), method->GetName(), method->GetShorty());
-  ShadowFrame* last_shadow_frame = self->GetManagedStack()->GetTopShadowFrame();
-  StringAppendArgumentValues(&result, method, last_shadow_frame);
-  return result;
-}
+// static std::string ArgumentsOnCurrentFrame(mirror::ArtMethod *method) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+//   Thread *self = Thread::Current();
+//   std::string tname;
+//   self->GetThreadName(tname);
+//   std::string result = StringPrintf("[%s(%d)] %s %s",
+//     tname.c_str(), self->GetTid(), method->GetName(), method->GetShorty());
+//   ShadowFrame* last_shadow_frame = self->GetManagedStack()->GetTopShadowFrame();
+//   StringAppendArgumentValues(&result, method, last_shadow_frame);
+//   return result;
+// }
 
 void MiniTrace::ReadBuffer(char *dest, size_t offset, size_t len) {
   // Must be called after ringbuf_consume
@@ -847,20 +847,7 @@ void MiniTrace::FieldWritten(Thread* thread, mirror::Object* this_object,
 
 void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
                           mirror::ArtMethod* method, uint32_t dex_pc) {
-  struct MethodStackVisitor : public StackVisitor {
-    explicit MethodStackVisitor(Thread* thread)
-        : StackVisitor(thread, NULL), tid(thread->GetTid()) {
-      thread->GetThreadName(tname);
-    }
 
-    bool VisitFrame() OVERRIDE SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-      LOG(INFO) << "MiniTrace ("<< tname << "$" << tid << "): "
-          "Frame Id=" << GetFrameId() << " " << DescribeLocation();
-      return true;
-    }
-    pid_t tid;
-    std::string tname;
-  };
   if (log_flag_ & kDoMethodEntered)
     LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodEntered);
 
@@ -882,11 +869,7 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
         bool is_late_message = (when > uptimeMillis + 10);
 
         mirror::Object *message = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegReference(9);
-        if (MessageDetail::cb_enqueueMessage(message, is_late_message)) {
-          LOG(INFO) << "Message enqueued with unknown cause...";
-          MethodStackVisitor visitor(thread);
-          visitor.WalkStack(true);
-        }
+        MessageDetail::cb_enqueueMessage(message, is_late_message);
         ForwardMessageStatus(kMessageTransitionEnqueued);
       }
     }

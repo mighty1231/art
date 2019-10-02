@@ -278,7 +278,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
      * Note: Every message enqueued do not need to be dispatched.
      *       Some messages are not dispatched by calling removeMessages.
      */
-    static bool cb_enqueueMessage(mirror::Object *message, bool late) {
+    static void cb_enqueueMessage(mirror::Object *message, bool late)
+        SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
       Thread *self = Thread::Current();
       {
         MutexLock mu(self, *lock);
@@ -306,7 +307,11 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         messages_.push_back(new_msg_detail);
         last_messages_[message] = messages_.back();
         cur_id_++;
-        return new_msg_detail->cause_unknown_;
+        if (new_msg_detail->cause_unknown_) {
+          LOG(INFO) << "Unknown sourced message " << new_msg_detail->Dump();
+          MethodStackVisitor visitor(self);
+          visitor.WalkStack(true);
+        }
       }
     }
     /* cause is logged for anytime */
@@ -438,6 +443,20 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     static Mutex *lock;
 
    private:
+    struct MethodStackVisitor : public StackVisitor {
+      explicit MethodStackVisitor(Thread* thread)
+          : StackVisitor(thread, NULL), tid(thread->GetTid()) {
+        thread->GetThreadName(tname);
+      }
+
+      bool VisitFrame() OVERRIDE SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+        LOG(INFO) << "["<< tname << "(" << tid << ")] "
+            "St#" << GetFrameId() << " " << DescribeLocation();
+        return true;
+      }
+      pid_t tid;
+      std::string tname;
+    };
     struct MessageCauseFinder : public StackVisitor {
       explicit MessageCauseFinder(Thread* thread, std::string *cause_ptr)
           : StackVisitor(thread, NULL), tid_(thread->GetTid()), cause_p(cause_ptr),
@@ -476,7 +495,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
               tname_.c_str(), tid_, last_method_->GetName()));
           StringAppendArgumentValues(cause_p, last_method_, last_shadow_frame_);
           cause_p->append("]");
-          // unknown_ = false;
+          unknown_ = false;
           return false;
         }
         // For nativePollOnce, store the last method
