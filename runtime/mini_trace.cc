@@ -325,7 +325,7 @@ static int CreateSocketAndCheckAPE() {
   int socket_fd;
   sockaddr_un server_addr;
   if ((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
-    PLOG(ERROR) << "MiniTrace::IdleCheck: socket " << errno;
+    PLOG(ERROR) << "MiniTrace::ConnectAPE - socket " << errno;
     return -1;
   }
 
@@ -335,11 +335,11 @@ static int CreateSocketAndCheckAPE() {
   int addrlen = sizeof server_addr.sun_family + strlen(&server_addr.sun_path[1]) + 1;
 
   if (connect(socket_fd, reinterpret_cast<sockaddr *>(&server_addr), addrlen) < 0) {
-    PLOG(ERROR) << "MiniTrace::IdleCheck: connect " << errno;
+    PLOG(ERROR) << "MiniTrace::ConnectAPE - connect " << errno;
     close(socket_fd);
     return -1;
   }
-  LOG(INFO) << "MiniTrace::IdleCheck: connect success!";
+  LOG(INFO) << "MiniTrace::ConnectAPE - connect success!";
   return socket_fd;
 }
 
@@ -1103,6 +1103,11 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
           ringbuf_worker_t *ringbuf_worker = GetRingBufWorker();
           CHECK(ringbuf_worker);
           WriteRingBuffer(ringbuf_worker, buf, 10);
+
+          // Send current timestamp to APE
+          if (ape_socket_fd_ != -1) {
+            write(ape_socket_fd_, &timestamp, 8);
+          }
         } else {
           LOG(INFO) << "MessageStatus: LooperMessageSent -> Enqueued, invoking addIdleHandler";
           goto run_add_idle;
