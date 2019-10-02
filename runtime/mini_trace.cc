@@ -749,8 +749,6 @@ void *MiniTrace::PingingTask(void *arg) {
 
     usleep(1 * 1000 * 1000);  // 1 second
     LOG(INFO) << "MiniTrace: 1 sec ping!";
-
-    LOG(INFO) << MessageDetail::DumpAll(true);
   }
   runtime->DetachCurrentThread();
 
@@ -773,14 +771,12 @@ void MiniTrace::new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass c
     main_ptr = ptr;
   }
   if (main_ptr == ptr) {  // if main MessageQueue,
-    LOG(INFO) << "MiniTrace: nativePollOnce(timeoutMillis = " << timeoutMillis << ") - enter";
     the_trace->ForwardMessageStatus(kMessageTransitionNativePollOnceEntered);
   }
   fntype* const fn = reinterpret_cast<fntype*>(MiniTrace::nativePollOnce_originalEntry);
   fn(env, clazz, ptr, timeoutMillis);
   if (main_ptr == ptr) {
     // the_trace->msg_enqueued_cnt_ = 0;
-    LOG(INFO) << "MiniTrace: nativePollOnce(timeoutMillis = " << timeoutMillis << ") - exit";
     the_trace->ForwardMessageStatus(kMessageTransitionNativePollOnceExited);
   }
 }
@@ -887,10 +883,9 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
 
         mirror::Object *message = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegReference(9);
         if (MessageDetail::cb_enqueueMessage(message, is_late_message)) {
-          LOG(INFO) << "Cause-unknown message, visiting stacks...";
+          LOG(INFO) << "Message enqueued with unknown cause...";
           MethodStackVisitor visitor(thread);
           visitor.WalkStack(true);
-          LOG(INFO) << "Visiting stacks success";
         }
         ForwardMessageStatus(kMessageTransitionEnqueued);
       }
@@ -911,34 +906,34 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
       MessageDetail::cb_Message_recycleUnchecked(this_object);
     }
 
-    if (UNLIKELY(method == method_Binder_execTransact_)) {
-      JNIEnvExt *env = thread->GetJniEnv();
-      ScopedObjectAccessUnchecked soa(env);
-      jstring jstr_descriptor = soa.AddLocalReference<jstring>(field_Binder_mDescriptor_->GetObject(this_object));
-      const char *descriptor = env->GetStringUTFChars(jstr_descriptor, 0);
-      std::string result = ArgumentsOnCurrentFrame(method);
-      LOG(INFO) << result << " desc:" << std::string(descriptor);
-      env->ReleaseStringUTFChars(jstr_descriptor, descriptor);
-    }
+    // if (UNLIKELY(method == method_Binder_execTransact_)) {
+    //   JNIEnvExt *env = thread->GetJniEnv();
+    //   ScopedObjectAccessUnchecked soa(env);
+    //   jstring jstr_descriptor = soa.AddLocalReference<jstring>(field_Binder_mDescriptor_->GetObject(this_object));
+    //   const char *descriptor = env->GetStringUTFChars(jstr_descriptor, 0);
+    //   std::string result = ArgumentsOnCurrentFrame(method);
+    //   LOG(INFO) << result << " desc:" << std::string(descriptor);
+    //   env->ReleaseStringUTFChars(jstr_descriptor, descriptor);
+    // }
   }
 
-  if (UNLIKELY(method == method_BinderProxy_transact_)) {
-    JNIEnvExt *env = thread->GetJniEnv();
-    ScopedObjectAccessUnchecked soa(env);
-    ScopedLocalRef<jobject> binderProxy(env, env->NewLocalRef(this_object));
-    ScopedLocalRef<jobject> interfaceDescriptor_(env,
-        env->CallObjectMethod(binderProxy.get(), soa.EncodeMethod(method_BinderProxy_getInterfaceDescriptor_)));
-    const char* descriptor = env->GetStringUTFChars((jstring) interfaceDescriptor_.get(), 0);
-    std::string result = ArgumentsOnCurrentFrame(method);
-    LOG(INFO) << result << " desc:" << std::string(descriptor);
-    env->ReleaseStringUTFChars((jstring) interfaceDescriptor_.get(), descriptor);
-  }
-  if (UNLIKELY(method == method_InputEventReceiver_dispatchInputEvent_)) {
-    LOG(INFO) << ArgumentsOnCurrentFrame(method);
-  }
-  if (UNLIKELY(method == method_InputEventReceiver_finishInputEvent_)) {
-    LOG(INFO) << ArgumentsOnCurrentFrame(method);
-  }
+  // if (UNLIKELY(method == method_BinderProxy_transact_)) {
+  //   JNIEnvExt *env = thread->GetJniEnv();
+  //   ScopedObjectAccessUnchecked soa(env);
+  //   ScopedLocalRef<jobject> binderProxy(env, env->NewLocalRef(this_object));
+  //   ScopedLocalRef<jobject> interfaceDescriptor_(env,
+  //       env->CallObjectMethod(binderProxy.get(), soa.EncodeMethod(method_BinderProxy_getInterfaceDescriptor_)));
+  //   const char* descriptor = env->GetStringUTFChars((jstring) interfaceDescriptor_.get(), 0);
+  //   std::string result = ArgumentsOnCurrentFrame(method);
+  //   LOG(INFO) << result << " desc:" << std::string(descriptor);
+  //   env->ReleaseStringUTFChars((jstring) interfaceDescriptor_.get(), descriptor);
+  // }
+  // if (UNLIKELY(method == method_InputEventReceiver_dispatchInputEvent_)) {
+  //   LOG(INFO) << ArgumentsOnCurrentFrame(method);
+  // }
+  // if (UNLIKELY(method == method_InputEventReceiver_finishInputEvent_)) {
+  //   LOG(INFO) << ArgumentsOnCurrentFrame(method);
+  // }
 }
 
 void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
@@ -952,9 +947,9 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
       // someHandler.DispatchMessage(Message msg)
       MessageDetail::cb_dispatchMessage_exit();
     }
-    if (UNLIKELY(method == method_Binder_execTransact_)) {
-      LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " execTransact exited";
-    }
+    // if (UNLIKELY(method == method_Binder_execTransact_)) {
+    //   LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " execTransact exited";
+    // }
 
     /* Check every queueIdle */
     if (UNLIKELY(thread == main_thread_
@@ -964,15 +959,15 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
     }
   }
 
-  if (UNLIKELY(method == method_BinderProxy_transact_)) {
-    LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " transact exited";
-  }
-  if (UNLIKELY(method == method_InputEventReceiver_dispatchInputEvent_)) {
-    LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " dispatchInputEvent exited";
-  }
-  if (UNLIKELY(method == method_InputEventReceiver_finishInputEvent_)) {
-    LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " finishInputEvent exited";
-  }
+  // if (UNLIKELY(method == method_BinderProxy_transact_)) {
+  //   LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " transact exited";
+  // }
+  // if (UNLIKELY(method == method_InputEventReceiver_dispatchInputEvent_)) {
+  //   LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " dispatchInputEvent exited";
+  // }
+  // if (UNLIKELY(method == method_InputEventReceiver_finishInputEvent_)) {
+  //   LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " finishInputEvent exited";
+  // }
 }
 
 void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,

@@ -340,7 +340,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       auto lm = last_messages_.find(message);
       if (lm != last_messages_.end()) {
         if (lm->second) {
-          MessageDetail *detail;
+          MessageDetail *detail = lm->second;
           LOG(INFO) << "Message recycled " << detail->Dump();
           detail->late_ = false;  // Deleted later
         }
@@ -451,8 +451,15 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         if (method == NULL)
           return true;
         if (method == method_Binder_execTransact_) {
-          cause_p->assign(StringPrintf("[Thread %s(%d) - execTransact",
-              tname_.c_str(), tid_));
+          JNIEnvExt *env = Thread::Current()->GetJniEnv();
+          ScopedObjectAccessUnchecked soa(env);
+          mirror::Object *binder_obj = GetThisObject();
+          jstring jstr_descriptor = soa.AddLocalReference<jstring>(
+              field_Binder_mDescriptor_->GetObject(binder_obj));
+          const char *descriptor = env->GetStringUTFChars(jstr_descriptor, 0);
+          cause_p->assign(StringPrintf("[Thread %s(%d) - execTransact(%s)",
+              tname_.c_str(), tid_, descriptor));
+          env->ReleaseStringUTFChars(jstr_descriptor, descriptor);
           RecordArgumentValues();
           cause_p->append("]");
           unknown_ = false;
