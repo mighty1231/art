@@ -859,17 +859,8 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
   if (log_flag_ & kLogMessage) {
     if (UNLIKELY(this_object == main_msgq_)) {
       if (UNLIKELY(method == method_msgq_enqueueMessage_)) {
-        /**
-         * enqueueMessage uses elapsed time after booting
-         * $ long uptimeMillis = SystemClock.uptimeMillis();
-         * It returns different value with System.currentTimeMillis();
-         */
-        int64_t uptimeMillis = systemTime(SYSTEM_TIME_MONOTONIC) / 1000000LL;
-        int64_t when = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegLong(10);
-        bool is_late_message = (when > uptimeMillis + 10);
-
         mirror::Object *message = thread->GetManagedStack()->GetTopShadowFrame()->GetVRegReference(9);
-        MessageDetail::cb_enqueueMessage(message, is_late_message);
+        MessageDetail::cb_enqueueMessage(message);
         ForwardMessageStatus(kMessageTransitionEnqueued);
       }
     }

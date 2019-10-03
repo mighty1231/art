@@ -41,6 +41,7 @@
 #include "ringbuf.h"
 #include "base/mutex.h"
 #include "ScopedLocalRef.h"
+#include <utils/Timers.h>
 
 // MAX_THREAD_COUNT may not be enough
 #define MAX_THREAD_COUNT 256
@@ -278,12 +279,19 @@ class MiniTrace : public instrumentation::InstrumentationListener {
      * Note: Every message enqueued do not need to be dispatched.
      *       Some messages are not dispatched by calling removeMessages.
      */
-    static void cb_enqueueMessage(mirror::Object *message, bool late)
+    static void cb_enqueueMessage(mirror::Object *message)
         SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-      Thread *self = Thread::Current();
+      Thread *self = Thread::Current();      
+      /**
+       * enqueueMessage uses elapsed time after booting
+       * $ long uptimeMillis = SystemClock.uptimeMillis();
+       * It returns different value with System.currentTimeMillis();
+       */
+      int64_t uptimeMillis = systemTime(SYSTEM_TIME_MONOTONIC) / 1000000LL;
+      int64_t when = self->GetManagedStack()->GetTopShadowFrame()->GetVRegLong(10);
+      int dispatch_timediff_millis = when - uptimeMillis;
       {
         MutexLock mu(self, *lock);
-        LOG(INFO) << "MessageDetail: enqueueMessage " << message;
 
         // Find message
         std::map<mirror::Object*, MessageDetail*>::iterator lm = last_messages_.find(message);
@@ -296,13 +304,13 @@ class MiniTrace : public instrumentation::InstrumentationListener {
           // cause exists
           std::vector<MessageDetail*> vec = cause_stack->second;
           if (!vec.empty()) {
-            new_msg_detail = new MessageDetail(message, late, vec.back());
+            new_msg_detail = new MessageDetail(message, dispatch_timediff_millis, vec.back());
           } else {
-            new_msg_detail = new MessageDetail(message, late, self);
+            new_msg_detail = new MessageDetail(message, dispatch_timediff_millis, self);
           }
         } else {
           // cause does not exist
-          new_msg_detail = new MessageDetail(message, late, self);
+          new_msg_detail = new MessageDetail(message, dispatch_timediff_millis, self);
         }
         messages_.push_back(new_msg_detail);
         last_messages_[message] = messages_.back();
@@ -347,7 +355,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         if (lm->second) {
           MessageDetail *detail = lm->second;
           LOG(INFO) << "Message recycled " << detail->Dump();
-          detail->late_ = false;  // Deleted later
+          detail->recycled_ = true;  // make true to delete later on FlushOut
         }
         lm->second = NULL;
       } else {
@@ -356,18 +364,22 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       }
     }
 
-    MessageDetail(mirror::Object *message, bool late, Thread *self):
-        message_(message), id_(cur_id_), late_(late) {
-      info_.assign(message_toString(message));
+    MessageDetail(mirror::Object *message, int dispatch_timediff_millis, Thread *self):
+        message_(message), id_(cur_id_),
+        dispatch_timediff_millis_(dispatch_timediff_millis),
+        recycled_(false) {
+      info_.assign(message_toString(message, dispatch_timediff_millis));
       MessageCauseFinder visitor(self, &cause_);
       visitor.WalkStack(true);
       cause_unknown_ = visitor.unknown_;
     }
 
-    MessageDetail(mirror::Object *message, bool late, MessageDetail *cause_object):
-        message_(message), id_(cur_id_),  late_(late),
-        cause_(StringPrintf("[Message id %d]", cause_object->id_)), cause_unknown_(false) {
-      info_.assign(message_toString(message));
+    MessageDetail(mirror::Object *message, int dispatch_timediff_millis, MessageDetail *cause_object):
+        message_(message), id_(cur_id_),
+        dispatch_timediff_millis_(dispatch_timediff_millis),
+        recycled_(false), cause_(StringPrintf("[Message id %d]", cause_object->id_)),
+        cause_unknown_(false) {
+      info_.assign(message_toString(message, dispatch_timediff_millis));
     }
 
     virtual ~MessageDetail() {};
@@ -376,7 +388,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       MutexLock mu(Thread::Current(), *lock);
       for (auto const& it : last_messages_) {
         MessageDetail *detail = it.second;
-        if (detail != NULL && !detail->late_) {
+        if (detail != NULL && !detail->IsQueuedLater()) {
           return false;
         }
       }
@@ -387,7 +399,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       MutexLock mu(Thread::Current(), *lock);
       for (auto const& it : last_messages_) {
         MessageDetail *detail = it.second;
-        if (detail != NULL && !detail->late_) {
+        if (detail != NULL && !detail->IsQueuedLater()) {
           return false;
         }
       }
@@ -408,7 +420,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       /* Flush out */
       for (auto iter = messages_.begin(); iter != messages_.end();) {
         MessageDetail *detail = (*iter);
-        if (detail->late_) {
+        if (detail->IsQueuedLater() && detail->recycled_ == false) {
           ++iter;
         } else {
           delete detail;
@@ -433,6 +445,10 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         }
       }
       return ret;
+    }
+
+    bool IsQueuedLater() {
+      return dispatch_timediff_millis_ > 10;
     }
 
     std::string Dump() const {
@@ -484,7 +500,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
           unknown_ = false;
           return false;
         } else if (method == method_InputEventReceiver_dispatchInputEvent_) {
-          cause_p->assign(StringPrintf("[Thread %s(%d) - dispatchInput",
+          cause_p->assign(StringPrintf("[Thread %s(%d) - dispatchInputEvent",
               tname_.c_str(), tid_));
           RecordArgumentValues();
           cause_p->append("]");
@@ -520,7 +536,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       mirror::ArtMethod *last_method_;
       ShadowFrame *last_shadow_frame_;
     };
-    static std::string message_toString(mirror::Object *message) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    static std::string message_toString(mirror::Object *message, int timediff_ms)
+        SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
       Thread *thread = Thread::Current();
       JNIEnvExt *env = thread->GetJniEnv();
       std::string ret;
@@ -543,6 +560,10 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       // OUT "{ callback=... }"
       size_t found = ret.find(' ', 2);
       ret.erase(2, found - 1);
+
+      // Append timediff information
+      if (timediff_ms > 10)
+        StringAppendF(&ret, " (queued %dms)", timediff_ms);
       return ret;
     }
     static std::vector<MessageDetail *> messages_;
@@ -552,7 +573,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     mirror::Object *message_;
     int id_;
     std::string info_;
-    bool late_;
+    int dispatch_timediff_millis_;
+    bool recycled_;
 
     /* Messages are defined from dispatchMessage or just thread */
     std::string cause_;
