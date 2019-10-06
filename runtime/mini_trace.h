@@ -327,7 +327,12 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       Thread *self = Thread::Current();
       MutexLock mu(self, *lock);
       auto lm = last_messages_.find(message);
-      CHECK(lm != last_messages_.end()) << "Dispatching message have been never seen??\n" << MessageDetail::DumpAll(false);
+      if (lm == last_messages_.end()) {
+        /* Maybe the app is dying now */
+        LOG(INFO) << "Dispatching never-seen message " << message
+            << "\n" << MessageDetail::DumpAll(false);
+        return NULL;
+      }
       MessageDetail *last_message = lm->second;
       if (thread_to_msgstack_.find(self) != thread_to_msgstack_.end()) {
         // already stack is constructed

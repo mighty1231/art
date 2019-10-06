@@ -1060,7 +1060,6 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
     case kMessageLooperMessageSent:
       if (transition == kMessageTransitionNativePollOnceExited) {
         if (MessageDetail::HasNoMoreMessageThenFlushOut()) {
-          LOG(INFO) << "MessageStatus: Successfully idle found!";
           message_status_ = kMessageInitial;
           uint64_t timestamp;
           {
@@ -1072,6 +1071,7 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
           ringbuf_worker_t *ringbuf_worker = GetRingBufWorker();
           CHECK(ringbuf_worker);
           WriteRingBuffer(ringbuf_worker, buf, 10);
+          LOG(INFO) << "MessageStatus: Idle Timestamp " << timestamp;
 
           // Send current timestamp to APE
           if (ape_socket_fd_ != -1) {
