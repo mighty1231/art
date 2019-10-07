@@ -1000,10 +1000,11 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
   static char buf[10];
 
   Thread *self = Thread::Current();
-  JNIEnv *env = self->GetJniEnv();
+  JNIEnvExt *env = self->GetJniEnv();
   MutexLock mu(self, *message_status_lock_);
   {
     if (m_idler_ == NULL) {
+      int ref_cnt = env->locals.Capacity();
       /* First time initialize objects */
       MiniTraceThreadFlag orig_flag = self->GetMiniTraceFlag();
       self->SetMiniTraceFlag(kMiniTraceExclude);
@@ -1026,6 +1027,7 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
       self->SetMiniTraceFlag(orig_flag);
 
       Append2LE(buf, 0);  // tid = 0
+      LOG(WARNING) << "MiniTrace: ForwardMessageStatus_init ref cnt " << ref_cnt << "->" << env->locals.Capacity();
     }
   }
   switch (message_status_) {
@@ -1092,9 +1094,13 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
     self->SetMiniTraceFlag(kMiniTraceExclude);
 
     ScopedObjectAccessUnchecked soa(env);
-    ScopedLocalRef<jobject> j_idler(env, soa.AddLocalReference<jobject>(m_idler_));
-    ScopedLocalRef<jobject> j_main_msgq(env, soa.AddLocalReference<jobject>(main_MessageQueue));
-    env->CallVoidMethod(j_main_msgq.get(), method_addIdleHandler, j_idler.get());
+    int ref_cnt = env->locals.Capacity();
+    {
+      ScopedLocalRef<jobject> j_idler(env, soa.AddLocalReference<jobject>(m_idler_));
+      ScopedLocalRef<jobject> j_main_msgq(env, soa.AddLocalReference<jobject>(main_MessageQueue));
+      env->CallVoidMethod(j_main_msgq.get(), method_addIdleHandler, j_idler.get());
+    }
+    LOG(WARNING) << "MiniTrace: ForwardMessageStatus enqueue ref cnt " << ref_cnt << "->" << env->locals.Capacity();
 
     self->SetMiniTraceFlag(orig_flag);
   }
@@ -1464,7 +1470,7 @@ ringbuf_worker_t *MiniTrace::GetRingBufWorker() {
     if (ringbuf_worker == NULL) {
       // No avilable worker slot
       LOG(ERROR) << "MiniTrace: There are too many active threads";
-      self->SetMiniTraceFlag(kMiniTraceExclude);;
+      self->SetMiniTraceFlag(kMiniTraceExclude);
       return NULL;
     }
     {

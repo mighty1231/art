@@ -492,17 +492,22 @@ class MiniTrace : public instrumentation::InstrumentationListener {
           return true;
         if (method == method_Binder_execTransact_) {
           JNIEnvExt *env = Thread::Current()->GetJniEnv();
-          ScopedObjectAccessUnchecked soa(env);
           mirror::Object *binder_obj = GetThisObject();
-          jstring jstr_descriptor = soa.AddLocalReference<jstring>(
-              field_Binder_mDescriptor_->GetObject(binder_obj));
-          const char *descriptor = env->GetStringUTFChars(jstr_descriptor, 0);
-          cause_p->assign(StringPrintf("[Thread %s(%d) - execTransact(%s)",
-              tname_.c_str(), tid_, descriptor));
-          env->ReleaseStringUTFChars(jstr_descriptor, descriptor);
-          RecordArgumentValues();
-          cause_p->append("]");
-          unknown_ = false;
+          ScopedObjectAccessUnchecked soa(env);
+          int ref_cnt = env->locals.Capacity();
+          {
+            jstring jstr_descriptor = soa.AddLocalReference<jstring>(
+                field_Binder_mDescriptor_->GetObject(binder_obj));
+            const char *descriptor = env->GetStringUTFChars(jstr_descriptor, 0);
+            cause_p->assign(StringPrintf("[Thread %s(%d) - execTransact(%s)",
+                tname_.c_str(), tid_, descriptor));
+            env->ReleaseStringUTFChars(jstr_descriptor, descriptor);
+            env->DeleteLocalRef(jstr_descriptor);
+            RecordArgumentValues();
+            cause_p->append("]");
+            unknown_ = false;
+          }
+          LOG(WARNING) << "MiniTrace: ref cnt " << ref_cnt << "->" << env->locals.Capacity();
           return false;
         } else if (method == method_InputEventReceiver_dispatchInputEvent_) {
           cause_p->assign(StringPrintf("[Thread %s(%d) - dispatchInputEvent",
@@ -549,6 +554,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       MiniTraceThreadFlag orig_flag = thread->GetMiniTraceFlag();
       thread->SetMiniTraceFlag(kMiniTraceExclude);
       ScopedObjectAccessUnchecked soa(thread);
+      int ref_cnt = env->locals.Capacity();
       {
         ScopedLocalRef<jobject> jmessage(env, env->NewLocalRef(message));
         ScopedLocalRef<jobject> message_string(env,
@@ -558,6 +564,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
         env->ReleaseStringUTFChars((jstring) message_string.get(), message_cstring);
       }
       thread->SetMiniTraceFlag(orig_flag);
+      LOG(WARNING) << "MiniTrace: message_toString ref cnt " << ref_cnt << "->" << env->locals.Capacity();
 
       // remove "when" part
       // IN  "{ when=-14s685ms callback=... }"
