@@ -115,7 +115,7 @@ enum MiniTraceAction {
 };
 
 static const uint16_t kMiniTraceHeaderLength     = 4+2+2+4+8;
-static const uint16_t kMiniTraceVersion          = 2;
+static const uint16_t kMiniTraceVersion          = 3;
 static const uint32_t kMiniTraceMagic            = 0x7254694D;  // MiTr
 void *MiniTrace::nativePollOnce_originalEntry = NULL;
 int MiniTrace::MessageDetail::cur_id_ = 0;
@@ -440,7 +440,10 @@ void MiniTrace::Start() {
     if (log_flag & kLogMessage) {
       MessageDetail::lock = new Mutex("MiniTrace MessageDetail lock");
     }
-    the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, 1024 * 1024, ape_socket_fd);
+    timeval now;
+    gettimeofday(&now, NULL);
+    the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, 1024 * 1024, ape_socket_fd,
+      now.tv_sec * 1000LL + now.tv_usec / 1000);
   }
 
   Runtime* runtime = Runtime::Current();
@@ -455,6 +458,7 @@ void MiniTrace::Start() {
   }
   if (log_flag & (kLogMessage | kConnectAPE))
     log_flag |= (kDoMethodEntered | kDoMethodExited);
+  log_flag |= kDoExceptionCaught;
   runtime->GetInstrumentation()->AddListener(the_trace, log_flag & kInstListener);
   runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
@@ -680,6 +684,8 @@ void *MiniTrace::ConsumerTask(void *arg) {
         }
       }
     }
+
+    the_trace->consumer_cycle_cnt_++;
   }
 
   delete databuf;
@@ -775,13 +781,14 @@ void MiniTrace::new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass c
 }
 
 MiniTrace::MiniTrace(int socket_fd, const char *prefix,
-        uint32_t log_flag, uint32_t buffer_size, int ape_socket_fd)
+        uint32_t log_flag, uint32_t buffer_size, int ape_socket_fd, uint64_t start_timestamp)
     : socket_fd_(socket_fd), data_bin_index_(0),
       buf_(new uint8_t[buffer_size]()),
       wids_registered_lock_(new Mutex("Ringbuf worker lock")),
       consumer_runs_(true), consumer_tid_(0),
       log_flag_(log_flag), do_coverage_((log_flag & kDoCoverage) != 0),
-      buffer_size_(buffer_size),
+      buffer_size_(buffer_size), start_timestamp_(start_timestamp),
+      consumer_cycle_cnt_(0),
       traced_method_lock_(new Mutex("MiniTrace method lock")),
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")),
@@ -818,10 +825,6 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
   CHECK(method_BinderProxy_getInterfaceDescriptor_);
   CHECK(method_InputEventReceiver_dispatchInputEvent_);
   CHECK(method_InputEventReceiver_finishInputEvent_);
-
-  timeval now;
-  gettimeofday(&now, NULL);
-  start_timestamp_ = now.tv_sec * 1000LL + now.tv_usec / 1000;
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
@@ -950,21 +953,27 @@ void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
 void MiniTrace::ExceptionCaught(Thread* thread, const ThrowLocation& throw_location,
                             mirror::ArtMethod* catch_method, uint32_t catch_dex_pc,
                             mirror::Throwable* exception_object) {
-  MiniTraceAction action = kMiniTraceExceptionCaught;
+  if (log_flag_ & kDoExceptionCaught) {
+    MiniTraceAction action = kMiniTraceExceptionCaught;
 
-  ringbuf_worker_t *ringbuf_worker = GetRingBufWorker();
-  if (ringbuf_worker == NULL)
-    return;
-  std::string content = exception_object->Dump();
-  uint16_t record_size = content.length() + 2 + 4 + 1;
-  char *buf = new char[record_size]();
+    ringbuf_worker_t *ringbuf_worker = GetRingBufWorker();
+    if (ringbuf_worker == NULL)
+      return;
+    std::string content = exception_object->Dump();
+    uint16_t record_size = content.length() + 2 + 4 + 1;
+    char *buf = new char[record_size]();
 
-  Append2LE(buf, thread->GetTid());
-  Append4LE(buf + 2, (record_size << 3) | action);
-  strcpy(buf + 6, content.c_str());
+    Append2LE(buf, thread->GetTid());
+    Append4LE(buf + 2, (record_size << 3) | action);
+    strcpy(buf + 6, content.c_str());
 
-  WriteRingBuffer(ringbuf_worker, buf, record_size);
-  delete buf;
+    WriteRingBuffer(ringbuf_worker, buf, record_size);
+    delete buf;
+  }
+  // Wait for a cycle on consumer
+  // @TODO use condition variable..?
+  int cycleid = consumer_cycle_cnt_;
+  while (consumer_cycle_cnt_ - cycleid <= 2) {}
 }
 
 void MiniTrace::LogMessage(Thread* thread, MessageDetail *msg_detail) {

@@ -591,7 +591,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
  private:
   explicit MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag,
-                     uint32_t buffer_size, int ape_socket_fd);
+                     uint32_t buffer_size, int ape_socket_fd, uint64_t start_timestamp);
 
   void LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
                            instrumentation::Instrumentation::InstrumentationEvent event)
@@ -691,15 +691,16 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   const uint32_t buffer_size_;
 
   // Time trace was created.
-  const uint64_t start_time_;
+  const uint64_t start_timestamp_;
+
+  // To sync on exception synchronization
+  volatile int consumer_cycle_cnt_;
 
   // Method Execution Data
   SafeMap<mirror::ArtMethod*, bool*> execution_data_;
 
   Mutex *traced_method_lock_;
-
   Mutex *traced_field_lock_;
-
   Mutex *traced_thread_lock_;
 
   /* Used for logging messages / idlecheck task */
