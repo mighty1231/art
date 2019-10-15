@@ -545,14 +545,7 @@ void *MiniTrace::ConsumerTask(void *arg) {
     Append2LE(header + 4, kMiniTraceVersion);
     Append2LE(header + 6, kMiniTraceHeaderLength);
     Append4LE(header + 8, the_trace->log_flag_);
-
-    uint64_t timestamp;
-    {
-      timeval now;
-      gettimeofday(&now, NULL);
-      timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
-    }
-    Append8LE(header + 12, timestamp);
+    Append8LE(header + 12, the_trace->start_timestamp_);
   }
 
   // Create empty file to log data
@@ -788,7 +781,7 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
       wids_registered_lock_(new Mutex("Ringbuf worker lock")),
       consumer_runs_(true), consumer_tid_(0),
       log_flag_(log_flag), do_coverage_((log_flag & kDoCoverage) != 0),
-      buffer_size_(buffer_size), start_time_(MicroTime()),
+      buffer_size_(buffer_size),
       traced_method_lock_(new Mutex("MiniTrace method lock")),
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")),
@@ -825,6 +818,10 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
   CHECK(method_BinderProxy_getInterfaceDescriptor_);
   CHECK(method_InputEventReceiver_dispatchInputEvent_);
   CHECK(method_InputEventReceiver_finishInputEvent_);
+
+  timeval now;
+  gettimeofday(&now, NULL);
+  start_timestamp_ = now.tv_sec * 1000LL + now.tv_usec / 1000;
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
