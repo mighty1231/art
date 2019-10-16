@@ -254,7 +254,6 @@ static int read_with_timeout(int socket_fd, void *buf, int size, int timeout_sec
   while (total_written < size) {
     written = read(socket_fd, reinterpret_cast<char *>(buf) + total_written, size - total_written);
     attempt++;
-
     if ((uint32_t) time(NULL) >= run_until)
       break;
     total_written += written;
@@ -406,6 +405,9 @@ void MiniTrace::Start() {
     // Currently UNUSED flags
     CHECK(!(log_flag & kLogFieldType1));
     CHECK(!(log_flag & kLogFieldType2));
+
+    // To turn on kConnectAPE, kLogMessage should be turn on.
+    CHECK(!(log_flag & kConnectAPE && !(log_flag & kLogMessage)));
     int ape_socket_fd = -1;
     if (log_flag & kConnectAPE) {
       ape_socket_fd = CreateSocketAndCheckAPE();
@@ -457,15 +459,15 @@ void MiniTrace::Start() {
     }
 
     // RedirectnativePollOnce
-    ScopedObjectAccess soa(env);
-    ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
-    mirror::Class* mirror_queueClass = soa.Decode<mirror::Class*>(queueClass.get());
-    mirror::ArtMethod *method_nativePollOnce = mirror_queueClass->FindDirectMethod("nativePollOnce", "(JI)V");
-    CHECK(method_msgq_nativePollOnce_ == method_nativePollOnce);
-    CHECK(method_nativePollOnce);
-    nativePollOnce_originalEntry = method_nativePollOnce->GetEntryPointFromJni();
-    method_nativePollOnce->SetEntryPointFromJni(reinterpret_cast<void *>(&new_android_os_MessageQueue_nativePollOnce));
     if (log_flag & kLogMessage) {
+      ScopedObjectAccess soa(env);
+      ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
+      mirror::Class* mirror_queueClass = soa.Decode<mirror::Class*>(queueClass.get());
+      mirror::ArtMethod *method_nativePollOnce = mirror_queueClass->FindDirectMethod("nativePollOnce", "(JI)V");
+      CHECK(method_msgq_nativePollOnce_ == method_nativePollOnce);
+      CHECK(method_nativePollOnce);
+      nativePollOnce_originalEntry = method_nativePollOnce->GetEntryPointFromJni();
+      method_nativePollOnce->SetEntryPointFromJni(reinterpret_cast<void *>(&new_android_os_MessageQueue_nativePollOnce));
       MessageDetail::lock = new Mutex("MiniTrace MessageDetail lock");
     }
     if (log_flag & (kLogMessage | kConnectAPE))
@@ -846,17 +848,19 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag,
   }
 
   main_thread_ = Thread::Current();
-  CHECK(method_msgq_next_);
-  CHECK(method_msgq_enqueueMessage_);
-  CHECK(method_msgq_nativePollOnce_);
-  CHECK(method_Message_recycleUnchecked_);
-  CHECK(method_Message_toString_);
-  CHECK(method_Binder_execTransact_);
-  CHECK(field_Binder_mDescriptor_);
-  CHECK(method_BinderProxy_transact_);
-  CHECK(method_BinderProxy_getInterfaceDescriptor_);
-  CHECK(method_InputEventReceiver_dispatchInputEvent_);
-  CHECK(method_InputEventReceiver_finishInputEvent_);
+  if (log_flag & (kLogMessage | kConnectAPE)) {
+    CHECK(method_msgq_next_);
+    CHECK(method_msgq_enqueueMessage_);
+    CHECK(method_msgq_nativePollOnce_);
+    CHECK(method_Message_recycleUnchecked_);
+    CHECK(method_Message_toString_);
+    CHECK(method_Binder_execTransact_);
+    CHECK(field_Binder_mDescriptor_);
+    CHECK(method_BinderProxy_transact_);
+    CHECK(method_BinderProxy_getInterfaceDescriptor_);
+    CHECK(method_InputEventReceiver_dispatchInputEvent_);
+    CHECK(method_InputEventReceiver_finishInputEvent_);
+  }
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
