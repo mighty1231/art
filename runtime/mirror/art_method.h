@@ -180,6 +180,14 @@ class MANAGED ArtMethod FINAL : public Object {
         | ((mark & 3) << kAccMiniTraceMarkedShift));
   }
 
+  ALWAYS_INLINE bool IsMiniTraceTarget() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return GetAccessFlags() & kAccMiniTraceTarget;
+  }
+
+  ALWAYS_INLINE void SetMiniTraceTarget() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SetAccessFlags(GetAccessFlags() | kAccMiniTraceTarget);
+  }
+
   bool CheckIncompatibleClassChange(InvokeType type) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   uint16_t GetMethodIndex() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);

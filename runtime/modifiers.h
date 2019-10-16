@@ -59,6 +59,9 @@ static constexpr uint32_t kAccMiniTraceType3            = 0x30000000;
 static constexpr uint32_t kAccMiniTraceTypeFlag         = 0x30000000;
 static constexpr uint32_t kAccMiniTraceTypeShift        = 28;
 
+// method filtering
+static constexpr uint32_t kAccMiniTraceTarget           = 0x40000000;
+
 // mark special methods
 static constexpr uint32_t kAccMiniTraceMarkedMask       = 0x00C00000;
 static constexpr uint32_t kAccMiniTraceMarkedFlag1      = 0x00400000;

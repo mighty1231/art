@@ -132,6 +132,10 @@ mirror::ArtMethod *MiniTrace::method_BinderProxy_transact_ = NULL;
 mirror::ArtMethod *MiniTrace::method_BinderProxy_getInterfaceDescriptor_ = NULL;
 mirror::ArtMethod *MiniTrace::method_InputEventReceiver_dispatchInputEvent_ = NULL;
 mirror::ArtMethod *MiniTrace::method_InputEventReceiver_finishInputEvent_ = NULL;
+const int MiniTrace::kApeTargetEntered  = 0xabeabe01;
+const int MiniTrace::kApeTargetExited   = 0xabeabe02;
+const int MiniTrace::kApeTargetUnwind   = 0xabeabe03;
+const int MiniTrace::kApeIdle           = 0xabe0de04;
 
 std::vector<MiniTrace::MessageDetail *> MiniTrace::MessageDetail::messages_;
 Mutex *MiniTrace::MessageDetail::lock = NULL;
@@ -343,28 +347,6 @@ static int CreateSocketAndCheckAPE() {
   return socket_fd;
 }
 
-// static void LogMethodInByteCode(mirror::ArtMethod *method) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-//   const DexFile::CodeItem* code_item = method->GetCodeItem();
-//   const Instruction* inst;
-//   int dex_pc = 0;
-//   for (int i = 0; i < 300; i++) {
-//     inst = Instruction::At(code_item->insns_ + dex_pc);
-//     LOG(INFO) << "method" << i << ": " << inst->DumpString(method->GetDexFile());
-//     dex_pc += inst->SizeInCodeUnits();
-//   }
-// }
-
-// static std::string ArgumentsOnCurrentFrame(mirror::ArtMethod *method) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-//   Thread *self = Thread::Current();
-//   std::string tname;
-//   self->GetThreadName(tname);
-//   std::string result = StringPrintf("[%s(%d)] %s %s",
-//     tname.c_str(), self->GetTid(), method->GetName(), method->GetShorty());
-//   ShadowFrame* last_shadow_frame = self->GetManagedStack()->GetTopShadowFrame();
-//   StringAppendArgumentValues(&result, method, last_shadow_frame);
-//   return result;
-// }
-
 void MiniTrace::ReadBuffer(char *dest, size_t offset, size_t len) {
   // Must be called after ringbuf_consume
   if (offset + len <= buffer_size_) {
@@ -399,14 +381,17 @@ void MiniTrace::Start() {
 
   char prefix[100];
   Thread* self = Thread::Current();
+  JNIEnvExt *env = self->GetJniEnv();
   MiniTrace *the_trace;
-  uint32_t log_flag;
+  uint32_t log_flag, listener_flag;
+  std::map<mirror::ArtMethod*, std::pair<int, int>> *mtd_targets = NULL;
   {
     MutexLock mu(self, *Locks::trace_lock_);
     if (the_trace_ != NULL)  // Already started
       return;
 
     int socket_fd = CreateSocketAndCheckUIDAndPrefix(prefix, uid, &log_flag);
+    listener_flag = log_flag;
     if (socket_fd == -1)
       return;
     LOG(INFO) << "MiniTrace: connection success, received prefix="
@@ -425,10 +410,53 @@ void MiniTrace::Start() {
     if (log_flag & kConnectAPE) {
       ape_socket_fd = CreateSocketAndCheckAPE();
       CHECK_NE(ape_socket_fd, -1);
+
+      // read targeting functions
+      int32_t num_funcs;
+      int32_t string_length;
+      int32_t flag;
+      char *clsname = new char[128];
+      char *funcname = new char[128];
+      char *sigstring = new char[256];
+      read(ape_socket_fd, &num_funcs, 4);
+      ScopedObjectAccess soa(env);
+      int32_t target_mask = kDoMethodEntered | kDoMethodExited | kDoMethodUnwind;
+      mtd_targets = new std::map<mirror::ArtMethod*, std::pair<int, int>>();
+      for (int func_id = 0; func_id < num_funcs; func_id++) {
+        // read class name
+        CHECK(read(ape_socket_fd, &string_length, 4) == 4);
+        CHECK(string_length < 128);
+        CHECK(read(ape_socket_fd, clsname, string_length) == string_length);
+
+        // read function name
+        CHECK(read(ape_socket_fd, &string_length, 4) == 4);
+        CHECK(string_length < 128);
+        CHECK(read(ape_socket_fd, funcname, string_length) == string_length);
+
+        // read sigstring
+        CHECK(read(ape_socket_fd, &string_length, 4) == 4);
+        CHECK(string_length < 256);
+        CHECK(read(ape_socket_fd, sigstring, string_length) == string_length);
+
+        // read flag
+        // 1: enter, 2: exit, 4:unwind
+        CHECK(read(ape_socket_fd, &flag, 4) == 4);
+        CHECK(!(flag & ~(target_mask))); listener_flag |= flag;
+        ScopedLocalRef<jclass> cls(env, env->FindClass(clsname));
+        jmethodID target_jid = env->GetMethodID(cls.get(), funcname, sigstring);
+        if (target_jid == 0)
+          target_jid = env->GetStaticMethodID(cls.get(), funcname, sigstring);
+        CHECK(target_jid != 0);
+        mirror::ArtMethod* method = soa.DecodeMethod(target_jid);
+        method->SetMiniTraceTarget();
+        mtd_targets->emplace(method, std::make_pair(func_id, flag));
+      }
+      delete sigstring;
+      delete funcname;
+      delete clsname;
     }
 
     // RedirectnativePollOnce
-    JNIEnvExt *env = self->GetJniEnv();
     ScopedObjectAccess soa(env);
     ScopedLocalRef<jclass> queueClass(env, env->FindClass("android/os/MessageQueue"));
     mirror::Class* mirror_queueClass = soa.Decode<mirror::Class*>(queueClass.get());
@@ -440,10 +468,14 @@ void MiniTrace::Start() {
     if (log_flag & kLogMessage) {
       MessageDetail::lock = new Mutex("MiniTrace MessageDetail lock");
     }
+    if (log_flag & (kLogMessage | kConnectAPE))
+      listener_flag |= (kDoMethodEntered | kDoMethodExited);
+    listener_flag |= kDoExceptionCaught;
+    listener_flag &= kInstListener;
     timeval now;
     gettimeofday(&now, NULL);
-    the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, 1024 * 1024, ape_socket_fd,
-      now.tv_sec * 1000LL + now.tv_usec / 1000);
+    the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, listener_flag,
+      1024 * 1024, ape_socket_fd, now.tv_sec * 1000LL + now.tv_usec / 1000, mtd_targets);
   }
 
   Runtime* runtime = Runtime::Current();
@@ -456,10 +488,7 @@ void MiniTrace::Start() {
                                         the_trace),
                                         "Pinging thread");
   }
-  if (log_flag & (kLogMessage | kConnectAPE))
-    log_flag |= (kDoMethodEntered | kDoMethodExited);
-  log_flag |= kDoExceptionCaught;
-  runtime->GetInstrumentation()->AddListener(the_trace, log_flag & kInstListener);
+  runtime->GetInstrumentation()->AddListener(the_trace, listener_flag);
   runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
 }
@@ -493,7 +522,7 @@ void MiniTrace::Shutdown() {
 
     runtime_thread_list->SuspendAll();
     runtime->GetInstrumentation()->DisableMethodTracing();
-    runtime->GetInstrumentation()->RemoveListener(the_trace, the_trace->log_flag_ & kInstListener);
+    runtime->GetInstrumentation()->RemoveListener(the_trace, the_trace->listener_flag_);
 
     // Wait for consumer
     if (consumer_thread != NULL) {
@@ -780,13 +809,15 @@ void MiniTrace::new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass c
   }
 }
 
-MiniTrace::MiniTrace(int socket_fd, const char *prefix,
-        uint32_t log_flag, uint32_t buffer_size, int ape_socket_fd, uint64_t start_timestamp)
+MiniTrace::MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag,
+        uint32_t listener_flag, uint32_t buffer_size, int ape_socket_fd, uint64_t start_timestamp,
+        std::map<mirror::ArtMethod*, std::pair<int, int>> *mtd_targets)
     : socket_fd_(socket_fd), data_bin_index_(0),
       buf_(new uint8_t[buffer_size]()),
       wids_registered_lock_(new Mutex("Ringbuf worker lock")),
       consumer_runs_(true), consumer_tid_(0),
-      log_flag_(log_flag), do_coverage_((log_flag & kDoCoverage) != 0),
+      log_flag_(log_flag), listener_flag_(listener_flag),
+      do_coverage_((log_flag & kDoCoverage) != 0),
       buffer_size_(buffer_size), start_timestamp_(start_timestamp),
       consumer_cycle_cnt_(0),
       traced_method_lock_(new Mutex("MiniTrace method lock")),
@@ -796,8 +827,9 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix,
       message_status_(kMessageInitial),
       message_status_lock_(new Mutex("MiniTrace message state lock")),
       main_msgq_(NULL),
-      ape_socket_fd_(ape_socket_fd), m_idler_(NULL),
-      pinging_thread_(0) {
+      ape_socket_fd_(ape_socket_fd),
+      ape_lock_(new Mutex("MiniTrace ape lock")), m_idler_(NULL),
+      pinging_thread_(0), mtd_targets_(mtd_targets) {
 
   // Set prefix
   strcpy(prefix_, prefix);
@@ -908,6 +940,16 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
   // if (UNLIKELY(method == method_InputEventReceiver_finishInputEvent_)) {
   //   LOG(INFO) << ArgumentsOnCurrentFrame(method);
   // }
+  if (thread == main_thread_ && method->IsMiniTraceTarget() && ape_socket_fd_ != -1) {
+    auto it = mtd_targets_->find(method);
+    CHECK(it != mtd_targets_->end());
+    if (it->second.second & kDoMethodEntered) {
+      int *func_id = &it->second.second;
+      MutexLock mu(thread, *ape_lock_);
+      write(ape_socket_fd_, &kApeTargetEntered, 4);
+      write(ape_socket_fd_, func_id, 4);
+    }
+  }
 }
 
 void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
@@ -921,9 +963,6 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
       // someHandler.DispatchMessage(Message msg)
       MessageDetail::cb_dispatchMessage_exit();
     }
-    // if (UNLIKELY(method == method_Binder_execTransact_)) {
-    //   LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " execTransact exited";
-    // }
 
     /* Check every queueIdle */
     if (UNLIKELY(thread == main_thread_
@@ -933,21 +972,34 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
     }
   }
 
-  // if (UNLIKELY(method == method_BinderProxy_transact_)) {
-  //   LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " transact exited";
-  // }
-  // if (UNLIKELY(method == method_InputEventReceiver_dispatchInputEvent_)) {
-  //   LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " dispatchInputEvent exited";
-  // }
-  // if (UNLIKELY(method == method_InputEventReceiver_finishInputEvent_)) {
-  //   LOG(INFO) << "MiniTrace: Thread " << thread->GetTid() << " finishInputEvent exited";
-  // }
+  if (thread == main_thread_ && method->IsMiniTraceTarget() && ape_socket_fd_ != -1) {
+    auto it = mtd_targets_->find(method);
+    CHECK(it != mtd_targets_->end());
+    if (it->second.second & kDoMethodExited) {
+      int *func_id = &it->second.second;
+      MutexLock mu(thread, *ape_lock_);
+      write(ape_socket_fd_, &kApeTargetExited, 4);
+      write(ape_socket_fd_, func_id, 4);
+    }
+  }
 }
 
 void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
                          mirror::ArtMethod* method, uint32_t dex_pc) {
   /* @TODO methods on exiting... */
-  LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodUnwind);
+  if (log_flag_ & kDoMethodUnwind)
+    LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodUnwind);
+
+  if (thread == main_thread_ && method->IsMiniTraceTarget() && ape_socket_fd_ != -1) {
+    auto it = mtd_targets_->find(method);
+    CHECK(it != mtd_targets_->end());
+    if (it->second.second & kDoMethodUnwind) {
+      int *func_id = &it->second.second;
+      MutexLock mu(thread, *ape_lock_);
+      write(ape_socket_fd_, &kApeTargetUnwind, 4);
+      write(ape_socket_fd_, func_id, 4);
+    }
+  }
 }
 
 void MiniTrace::ExceptionCaught(Thread* thread, const ThrowLocation& throw_location,
@@ -1081,6 +1133,8 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
 
           // Send current timestamp to APE
           if (ape_socket_fd_ != -1) {
+            MutexLock mu(self, *ape_lock_);
+            write(ape_socket_fd_, &kApeIdle, 4);
             write(ape_socket_fd_, &timestamp, 8);
           }
         } else {

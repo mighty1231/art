@@ -95,6 +95,11 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     kFlagAll             = 0xFF0301FF
   };
 
+  static const int kApeTargetEntered;
+  static const int kApeTargetExited;
+  static const int kApeTargetUnwind;
+  static const int kApeIdle;
+
   enum MessageStatus {
     kMessageInitial,
     kMessageEnqueued,
@@ -591,7 +596,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
  private:
   explicit MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag,
-                     uint32_t buffer_size, int ape_socket_fd, uint64_t start_timestamp);
+                     uint32_t listener_flag, uint32_t buffer_size,
+                     int ape_socket_fd, uint64_t start_timestamp,
+                     std::map<mirror::ArtMethod*, std::pair<int, int>> *mtd_targets);
 
   void LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
                            instrumentation::Instrumentation::InstrumentationEvent event)
@@ -685,6 +692,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   // Events, default open every available events.
   const uint32_t log_flag_;
 
+  // Similar to log_flag, used for removelistener
+  const uint32_t listener_flag_;
+
   // Log execution data
   bool do_coverage_;
 
@@ -724,12 +734,16 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   /* uses enqueueMessage and logging messages */
   mirror::Object *main_msgq_;
 
-  /* Used for idle checking */
+  /* Used for communicate with ape */
   int ape_socket_fd_;
+  Mutex *ape_lock_;
   mirror::Object *m_idler_;
 
   // Push simple log for every 1 second
   pthread_t pinging_thread_;
+
+  // method targeting
+  std::map<mirror::ArtMethod*, std::pair<int, int>> *mtd_targets_;
 
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
 };
