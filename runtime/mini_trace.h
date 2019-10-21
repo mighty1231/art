@@ -95,6 +95,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
     kFlagAll             = 0xFF0301FF
   };
 
+  static const int kApeHandShake;
   static const int kApeTargetEntered;
   static const int kApeTargetExited;
   static const int kApeTargetUnwind;

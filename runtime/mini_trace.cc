@@ -132,6 +132,8 @@ mirror::ArtMethod *MiniTrace::method_BinderProxy_transact_ = NULL;
 mirror::ArtMethod *MiniTrace::method_BinderProxy_getInterfaceDescriptor_ = NULL;
 mirror::ArtMethod *MiniTrace::method_InputEventReceiver_dispatchInputEvent_ = NULL;
 mirror::ArtMethod *MiniTrace::method_InputEventReceiver_finishInputEvent_ = NULL;
+
+const int MiniTrace::kApeHandShake      = 0x0abeabe0;
 const int MiniTrace::kApeTargetEntered  = 0xabeabe01;
 const int MiniTrace::kApeTargetExited   = 0xabeabe02;
 const int MiniTrace::kApeTargetUnwind   = 0xabeabe03;
@@ -413,48 +415,67 @@ void MiniTrace::Start() {
       ape_socket_fd = CreateSocketAndCheckAPE();
       CHECK_NE(ape_socket_fd, -1);
 
-      // read targeting functions
-      int32_t num_funcs;
-      int32_t string_length;
-      int32_t flag;
+      // read targeting methods
+      int32_t hsval, num_funcs, string_length, flag;
       char *clsname = new char[128];
-      char *funcname = new char[128];
-      char *sigstring = new char[256];
-      read(ape_socket_fd, &num_funcs, 4);
+      char *methodname = new char[128];
+      char *sigstring = new char[512];
+      CHECK(*((int *)&kApeHandShake)  == kApeHandShake);
+      if (write(ape_socket_fd, &kApeHandShake, 4) != 4) { PLOG(ERROR) << "write handshaking value"; }
+      if (read(ape_socket_fd, &hsval, 4) != 4) { PLOG(ERROR) << "read handshaking value"; }
+      CHECK(hsval == kApeHandShake) << StringPrintf("Connect with APE: handshaking value %d", hsval);
+      if (read(ape_socket_fd, &num_funcs, 4) != 4) { PLOG(ERROR) << "read num_funcs"; }
       ScopedObjectAccess soa(env);
       int32_t target_mask = kDoMethodEntered | kDoMethodExited | kDoMethodUnwind;
       mtd_targets = new std::map<mirror::ArtMethod*, std::pair<int, int>>();
       for (int func_id = 0; func_id < num_funcs; func_id++) {
+        LOG(INFO) << "MiniTrace: func_id " << func_id;
         // read class name
-        CHECK(read(ape_socket_fd, &string_length, 4) == 4);
-        CHECK(string_length < 128);
-        CHECK(read(ape_socket_fd, clsname, string_length) == string_length);
+        if (read(ape_socket_fd, &string_length, 4) != 4) { PLOG(ERROR) << StringPrintf("read string_length %d", string_length); }
+        CHECK(string_length < 127);
+        if (read(ape_socket_fd, clsname, string_length) != string_length) { PLOG(ERROR) << "read clsname"; }
+        clsname[string_length] = 0;
 
         // read function name
-        CHECK(read(ape_socket_fd, &string_length, 4) == 4);
-        CHECK(string_length < 128);
-        CHECK(read(ape_socket_fd, funcname, string_length) == string_length);
+        if (read(ape_socket_fd, &string_length, 4) != 4) { PLOG(ERROR) << StringPrintf("read string_length %d", string_length); }
+        CHECK(string_length < 127);
+        if (read(ape_socket_fd, methodname, string_length) != string_length) { PLOG(ERROR) << "read methodname"; }
+        methodname[string_length] = 0;
 
         // read sigstring
-        CHECK(read(ape_socket_fd, &string_length, 4) == 4);
-        CHECK(string_length < 256);
-        CHECK(read(ape_socket_fd, sigstring, string_length) == string_length);
+        if (read(ape_socket_fd, &string_length, 4) != 4) { PLOG(ERROR) << StringPrintf("read string_length %d", string_length); }
+        CHECK(string_length < 511);
+        if (read(ape_socket_fd, sigstring, string_length) != string_length) { PLOG(ERROR) << "read sigstring"; }
+        sigstring[string_length] = 0;
 
         // read flag
         // 1: enter, 2: exit, 4:unwind
-        CHECK(read(ape_socket_fd, &flag, 4) == 4);
+        if (read(ape_socket_fd, &flag, 4) != 4) { PLOG(ERROR) << "read flag"; }
         CHECK(!(flag & ~(target_mask))); listener_flag |= flag;
         ScopedLocalRef<jclass> cls(env, env->FindClass(clsname));
-        jmethodID target_jid = env->GetMethodID(cls.get(), funcname, sigstring);
-        if (target_jid == 0)
-          target_jid = env->GetStaticMethodID(cls.get(), funcname, sigstring);
-        CHECK(target_jid != 0);
-        mirror::ArtMethod* method = soa.DecodeMethod(target_jid);
+
+        mirror::Class* clsp = soa.Decode<mirror::Class*>(cls.get());
+        mirror::ArtMethod* method = nullptr;
+        method = clsp->FindVirtualMethod(methodname, sigstring);
+        if (method == nullptr) {
+          // No virtual method matching the signature.  Search declared
+          // private methods and constructors.
+          method = clsp->FindDeclaredDirectMethod(methodname, sigstring);
+          if (method == nullptr) {
+            // static
+            method = clsp->FindDirectMethod(methodname, sigstring);
+          }
+        }
+        CHECK(method != 0) << StringPrintf("MiniTrace: Method not found: %s %s %s", clsname, methodname, sigstring);
         method->SetMiniTraceTarget();
         mtd_targets->emplace(method, std::make_pair(func_id, flag));
+        LOG(INFO) << "MiniTrace: clsname " << clsname;
+        LOG(INFO) << "MiniTrace: methodname " << clsname;
+        LOG(INFO) << "MiniTrace: sigstring " << clsname;
+        LOG(INFO) << "MiniTrace: method " << method;
       }
       delete sigstring;
-      delete funcname;
+      delete methodname;
       delete clsname;
     }
 
@@ -950,8 +971,8 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
     if (it->second.second & kDoMethodEntered) {
       int *func_id = &it->second.second;
       MutexLock mu(thread, *ape_lock_);
-      write(ape_socket_fd_, &kApeTargetEntered, 4);
-      write(ape_socket_fd_, func_id, 4);
+      CHECK(write(ape_socket_fd_, &kApeTargetEntered, 4) == 4);
+      CHECK(write(ape_socket_fd_, func_id, 4) == 4);
     }
   }
 }
@@ -982,8 +1003,8 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
     if (it->second.second & kDoMethodExited) {
       int *func_id = &it->second.second;
       MutexLock mu(thread, *ape_lock_);
-      write(ape_socket_fd_, &kApeTargetExited, 4);
-      write(ape_socket_fd_, func_id, 4);
+      CHECK(write(ape_socket_fd_, &kApeTargetExited, 4) == 4);
+      CHECK(write(ape_socket_fd_, func_id, 4) == 4);
     }
   }
 }
@@ -1000,8 +1021,8 @@ void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
     if (it->second.second & kDoMethodUnwind) {
       int *func_id = &it->second.second;
       MutexLock mu(thread, *ape_lock_);
-      write(ape_socket_fd_, &kApeTargetUnwind, 4);
-      write(ape_socket_fd_, func_id, 4);
+      CHECK(write(ape_socket_fd_, &kApeTargetUnwind, 4) == 4);
+      CHECK(write(ape_socket_fd_, func_id, 4) == 4);
     }
   }
 }
@@ -1138,8 +1159,8 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
           // Send current timestamp to APE
           if (ape_socket_fd_ != -1) {
             MutexLock mu(self, *ape_lock_);
-            write(ape_socket_fd_, &kApeIdle, 4);
-            write(ape_socket_fd_, &timestamp, 8);
+            CHECK(write(ape_socket_fd_, &kApeIdle, 4) == 4);
+            CHECK(write(ape_socket_fd_, &timestamp, 8) == 8);
           }
         } else {
           LOG(INFO) << "MessageStatus: LooperMessageSent -> Enqueued, invoking addIdleHandler";
