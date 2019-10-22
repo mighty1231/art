@@ -1114,13 +1114,11 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
   switch (message_status_) {
     case kMessageInitial:
       if (transition == kMessageTransitionEnqueued) {
-        LOG(INFO) << "MessageStatus: Initial -> Enqueued, invoking addIdleHandler";
         goto run_add_idle;
       }
       break;
     case kMessageEnqueued:
       if (transition == kMessageTransitionQueueIdleExited) {
-        LOG(INFO) << "MessageStatus: Enqueued -> Idled";
         message_status_ = kMessageIdled;
       }
       break;
@@ -1129,13 +1127,11 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
         if (MessageDetail::HasNoMoreMessage()) {
           // Looper::sendMessage
           message_status_ = kMessageLooperMessageSent;
-          LOG(INFO) << "MessageStatus: Idled -> LooperMessageSent, sending looper message";
           if (nativeLooperMessageHandler == NULL)
             nativeLooperMessageHandler = new MiniMessageHandler();
           android::Message msg(0);
           android::Looper::getForThread()->sendMessage(nativeLooperMessageHandler, msg);
         } else {
-          LOG(INFO) << "MessageStatus: Idled -> Enqueued, invoking addIdleHandler";
           goto run_add_idle;
         }
       }
@@ -1163,7 +1159,6 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
             CHECK(write(ape_socket_fd_, &timestamp, 8) == 8);
           }
         } else {
-          LOG(INFO) << "MessageStatus: LooperMessageSent -> Enqueued, invoking addIdleHandler";
           goto run_add_idle;
         }
       }
@@ -1581,7 +1576,6 @@ void MiniTrace::UnregisterThread(Thread *thread) {
     /* Log termination of thread */
     Append2LE(buf, 2);  // tid = 2
     Append4LE(buf + 2, thread->GetTid());
-    LOG(INFO) << "Termination of thread... " << thread->GetTid();
     WriteRingBuffer(ringbuf_worker, buf, 6);
 
     /* Unregister ringbuf */

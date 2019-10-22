@@ -365,7 +365,6 @@ class MiniTrace : public instrumentation::InstrumentationListener {
       if (lm != last_messages_.end()) {
         if (lm->second) {
           MessageDetail *detail = lm->second;
-          LOG(INFO) << "Message recycled " << detail->Dump();
           detail->recycled_ = true;  // make true to delete later on FlushOut
         }
         lm->second = NULL;
