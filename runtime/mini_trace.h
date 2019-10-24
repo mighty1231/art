@@ -58,6 +58,21 @@ class Thread;
 void StringAppendArgumentValues(std::string *string_p, mirror::ArtMethod *method, ShadowFrame *shadow_frame)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
+class lazy_target {
+public:
+  int id;
+  std::string clsname;
+  std::string mtdname;
+  std::string signature;
+  int flag;
+  lazy_target(int id_, char *clsname_, char *mtdname_, char *signature_, int flag_) :
+      id(id_), clsname(clsname_), mtdname(mtdname_), signature(signature_), flag(flag_) {
+    // android/os/MessageQueue -> Landroid/os/MessageQueue;
+    clsname.insert(0, 1, 'L');
+    clsname.insert(clsname.end(), 1, ';');
+  }
+};
+
 class MiniTrace : public instrumentation::InstrumentationListener {
  public:
   enum MiniTraceFlag {
@@ -598,7 +613,8 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   explicit MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag,
                      uint32_t listener_flag, uint32_t buffer_size,
                      int ape_socket_fd, uint64_t start_timestamp,
-                     std::map<mirror::ArtMethod*, std::pair<int, int>> *mtd_targets);
+                     std::map<mirror::ArtMethod*, std::pair<int, int>> *mtd_targets,
+                     std::vector<lazy_target> *lazy_targets);
 
   void LogMethodTraceEvent(Thread* thread, mirror::ArtMethod* method, uint32_t dex_pc,
                            instrumentation::Instrumentation::InstrumentationEvent event)
@@ -744,6 +760,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   // method targeting
   std::map<mirror::ArtMethod*, std::pair<int, int>> *mtd_targets_;
+
+  // class, methodname, signature, flag
+  std::vector<lazy_target> *lazy_targets_;
 
   DISALLOW_COPY_AND_ASSIGN(MiniTrace);
 };

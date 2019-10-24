@@ -386,6 +386,7 @@ void MiniTrace::Start() {
   MiniTrace *the_trace;
   uint32_t log_flag, listener_flag;
   std::map<mirror::ArtMethod*, std::pair<int, int>> *mtd_targets = NULL;
+  std::vector<lazy_target> *lazy_targets = NULL;
   {
     MutexLock mu(self, *Locks::trace_lock_);
     if (the_trace_ != NULL)  // Already started
@@ -419,7 +420,7 @@ void MiniTrace::Start() {
       int32_t hsval, num_funcs, string_length, flag;
       char *clsname = new char[128];
       char *methodname = new char[128];
-      char *sigstring = new char[512];
+      char *signature = new char[512];
       CHECK(*((int *)&kApeHandShake)  == kApeHandShake);
       int written;
       CHECK((written = write(ape_socket_fd, &kApeHandShake, 4)) == 4)
@@ -433,6 +434,8 @@ void MiniTrace::Start() {
       ScopedObjectAccess soa(env);
       int32_t target_mask = kDoMethodEntered | kDoMethodExited | kDoMethodUnwind;
       mtd_targets = new std::map<mirror::ArtMethod*, std::pair<int, int>>();
+
+      int before_refcnt0 = env->locals.Capacity();
       for (int func_id = 0; func_id < num_funcs; func_id++) {
         LOG(INFO) << "MiniTrace: func_id " << func_id;
         // read class name
@@ -457,16 +460,16 @@ void MiniTrace::Start() {
         methodname[string_length] = 0;
         LOG(INFO) << "MiniTrace: methodname " << methodname;
 
-        // read sigstring
+        // read signature
         CHECK((written = read_with_timeout(ape_socket_fd, &string_length, 4)) == 4)
               << StringPrintf("MiniTrace: ConnectAPE - read string_length %d %s ", written, strerror(errno));
         LOG(INFO) << "MiniTrace: ConnectAPE : string_length " << string_length;
         CHECK(0 < string_length && string_length <= 511)
               << StringPrintf("MiniTrace: ConnectAPE - string_length %d", string_length);
-        CHECK((written = read_with_timeout(ape_socket_fd, sigstring, string_length)) == string_length)
-              << StringPrintf("MiniTrace: ConnectAPE - read sigstring %d %s ", written, strerror(errno));
-        sigstring[string_length] = 0;
-        LOG(INFO) << "MiniTrace: sigstring " << sigstring;
+        CHECK((written = read_with_timeout(ape_socket_fd, signature, string_length)) == string_length)
+              << StringPrintf("MiniTrace: ConnectAPE - read signature %d %s ", written, strerror(errno));
+        signature[string_length] = 0;
+        LOG(INFO) << "MiniTrace: signature " << signature;
 
         // read flag
         // 1: enter, 2: exit, 4:unwind
@@ -474,50 +477,51 @@ void MiniTrace::Start() {
               << StringPrintf("MiniTrace: ConnectAPE - read flag %d %s", written, strerror(errno));
         CHECK(!(flag & ~(target_mask))); listener_flag |= flag;
         LOG(INFO) << "MiniTrace: flag " << flag;
-        jclass msgqclass_tmp = env->FindClass("android/os/Message");
-        jclass cls_obj = NULL;
-        if (cls_obj == NULL) {
-          // jclass randomClass;
-          jclass randomClassObject;
-          ScopedLocalRef<jclass> randomClass(env, msgqclass_tmp);
-          Runtime *runtime = Runtime::Current();
-          LOG(INFO) << "MiniTrace runtime running "  << runtime->IsStarted();
-          LOG(INFO) << "cls_obj " << cls_obj << " / randomClass " << msgqclass_tmp;
-          for (int i=0; i<300; i++) {
-            // randomClass = env->FindClass("android/os/MessageQueue");
-            int ref_cnt1 = env->locals.Capacity();
-            randomClassObject = env->GetObjectClass(msgqclass_tmp);
-            int ref_cnt2 = env->locals.Capacity();
-            LOG(INFO) << "MiniTrace: refcnt " << ref_cnt1 << "/" << ref_cnt2;
+
+        int before_refcnt = env->locals.Capacity();
+        jclass target_cls = env->FindClass(clsname);
+        if (target_cls == NULL) {
+          // lazy
+          jthrowable exception = env->ExceptionOccurred();
+          CHECK(exception != 0);
+          env->DeleteLocalRef(exception);
+          env->ExceptionClear();
+          if (lazy_targets == NULL) {
+            lazy_targets = new std::vector<lazy_target>();
           }
-          jclass classLoaderClass = env->FindClass("java/lang/ClassLoader");
-          jmethodID getClassLoaderMethod = env->GetMethodID(classLoaderClass, "getClassLoader", "()Ljava/lang/ClassLoader;");
-          jobject gClassLoader = env->CallObjectMethod(randomClassObject, getClassLoaderMethod);
-          jmethodID gFindClassMethod = env->GetMethodID(classLoaderClass, "findClass", "(Ljava/lang/String;)Ljava/lang/Class;");
-          cls_obj = static_cast<jclass>(env->CallObjectMethod(gClassLoader, gFindClassMethod, env->NewStringUTF(clsname)));
-
-        }
-        CHECK(cls_obj != 0) << StringPrintf("MiniTrace: class %s not found", clsname);
-        ScopedLocalRef<jclass> cls(env, cls_obj);
-
-        mirror::Class* clsp = soa.Decode<mirror::Class*>(cls.get());
-        mirror::ArtMethod* method = nullptr;
-        method = clsp->FindVirtualMethod(methodname, sigstring);
-        if (method == nullptr) {
-          // No virtual method matching the signature.  Search declared
-          // private methods and constructors.
-          method = clsp->FindDeclaredDirectMethod(methodname, sigstring);
+          lazy_targets->emplace_back(func_id, clsname, methodname, signature, flag);
+          LOG(INFO) << StringPrintf("MiniTrace: Method %s:%s[%s] would be lazily registered",
+              clsname, methodname, signature);
+        } else {
+          mirror::Class* clsp = soa.Decode<mirror::Class*>(target_cls);
+          mirror::ArtMethod* method = nullptr;
+          method = clsp->FindVirtualMethod(methodname, signature);
           if (method == nullptr) {
-            // static
-            method = clsp->FindDirectMethod(methodname, sigstring);
+            // No virtual method matching the signature.  Search declared
+            // private methods and constructors.
+            method = clsp->FindDeclaredDirectMethod(methodname, signature);
+            if (method == nullptr) {
+              // static
+              method = clsp->FindDirectMethod(methodname, signature);
+            }
           }
+          env->DeleteLocalRef(target_cls);
+          CHECK(method != 0) << StringPrintf("MiniTrace: Method %s:%s[%s] not found",
+              clsname, methodname, signature);
+          method->SetMiniTraceTarget();
+          mtd_targets->emplace(method, std::make_pair(func_id, flag));
+          LOG(INFO) << StringPrintf("MiniTrace: Method %s:%s[%s] registered",
+              clsname, methodname, signature);
         }
-        CHECK(method != 0) << StringPrintf("MiniTrace: Method not found: %s %s %s", clsname, methodname, sigstring);
-        method->SetMiniTraceTarget();
-        mtd_targets->emplace(method, std::make_pair(func_id, flag));
-        LOG(INFO) << "MiniTrace: method " << method;
+        int after_refcnt = env->locals.Capacity();
+        CHECK(before_refcnt == after_refcnt) << StringPrintf(
+            "MiniTrace: refcnt %d -> %d", before_refcnt, after_refcnt);
       }
-      delete sigstring;
+
+      int after_refcnt0 = env->locals.Capacity();
+      CHECK(before_refcnt0 == after_refcnt0) << StringPrintf(
+          "MiniTrace: refcnt0 %d -> %d", before_refcnt0, after_refcnt0);
+      delete signature;
       delete methodname;
       delete clsname;
     }
@@ -541,7 +545,8 @@ void MiniTrace::Start() {
     timeval now;
     gettimeofday(&now, NULL);
     the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, listener_flag,
-      1024 * 1024, ape_socket_fd, now.tv_sec * 1000LL + now.tv_usec / 1000, mtd_targets);
+      1024 * 1024, ape_socket_fd, now.tv_sec * 1000LL + now.tv_usec / 1000,
+      mtd_targets, lazy_targets);
   }
 
   Runtime* runtime = Runtime::Current();
@@ -877,7 +882,8 @@ void MiniTrace::new_android_os_MessageQueue_nativePollOnce(JNIEnv* env, jclass c
 
 MiniTrace::MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag,
         uint32_t listener_flag, uint32_t buffer_size, int ape_socket_fd, uint64_t start_timestamp,
-        std::map<mirror::ArtMethod*, std::pair<int, int>> *mtd_targets)
+        std::map<mirror::ArtMethod*, std::pair<int, int>> *mtd_targets,
+        std::vector<lazy_target> *lazy_targets)
     : socket_fd_(socket_fd), data_bin_index_(0),
       buf_(new uint8_t[buffer_size]()),
       wids_registered_lock_(new Mutex("Ringbuf worker lock")),
@@ -895,7 +901,7 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag,
       main_msgq_(NULL),
       ape_socket_fd_(ape_socket_fd),
       ape_lock_(new Mutex("MiniTrace ape lock")), m_idler_(NULL),
-      pinging_thread_(0), mtd_targets_(mtd_targets) {
+      pinging_thread_(0), mtd_targets_(mtd_targets), lazy_targets_(lazy_targets) {
 
   // Set prefix
   strcpy(prefix_, prefix);
@@ -1008,6 +1014,8 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
   // if (UNLIKELY(method == method_InputEventReceiver_finishInputEvent_)) {
   //   LOG(INFO) << ArgumentsOnCurrentFrame(method);
   // }
+
+  // send APE when specific methods are met
   if (thread == main_thread_ && method->IsMiniTraceTarget() && ape_socket_fd_ != -1) {
     auto it = mtd_targets_->find(method);
     CHECK(it != mtd_targets_->end());
@@ -1040,6 +1048,7 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
     }
   }
 
+  // send APE when specific methods are met
   if (thread == main_thread_ && method->IsMiniTraceTarget() && ape_socket_fd_ != -1) {
     auto it = mtd_targets_->find(method);
     CHECK(it != mtd_targets_->end());
@@ -1054,10 +1063,10 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
 
 void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
                          mirror::ArtMethod* method, uint32_t dex_pc) {
-  /* @TODO methods on exiting... */
   if (log_flag_ & kDoMethodUnwind)
     LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodUnwind);
 
+  // send APE when specific methods are met
   if (thread == main_thread_ && method->IsMiniTraceTarget() && ape_socket_fd_ != -1) {
     auto it = mtd_targets_->find(method);
     CHECK(it != mtd_targets_->end());
@@ -1435,6 +1444,51 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass, const char *descriptor) {
 
   // if (&dxFile == apkDexFile) {
   if (dxFile.GetLocation().rfind("/data/app/", 0) == 0) {
+    // register lazy target
+    {
+      MutexLock mu(Thread::Current(), *Locks::trace_lock_);
+      if (the_trace_ != NULL && the_trace_->lazy_targets_ != NULL) {
+        auto targets = the_trace_->lazy_targets_;
+        for (auto it = targets->begin(); it != targets->end();) {
+          lazy_target &target = (*it);
+          if (target.clsname.compare(descriptor) == 0) {
+            mirror::ArtMethod* method = nullptr;
+            method = klass->FindVirtualMethod(
+                  target.mtdname.c_str(), target.signature.c_str());
+            if (method == nullptr) {
+              // No virtual method matching the signature.  Search declared
+              // private methods and constructors.
+              method = klass->FindDeclaredDirectMethod(
+                    target.mtdname.c_str(), target.signature.c_str());
+              if (method == nullptr) {
+                // static
+                method = klass->FindDirectMethod(
+                      target.mtdname.c_str(), target.signature.c_str());
+              }
+            }
+
+            CHECK(method != nullptr)
+                << StringPrintf("MiniTrace: method %s[%s] not found %s",
+                                target.mtdname.c_str(), target.signature.c_str(),
+                                descriptor);
+            method->SetMiniTraceTarget();
+            the_trace_->mtd_targets_->emplace(method,
+                                             std::make_pair(target.id, target.flag));
+            LOG(INFO) << StringPrintf("MiniTrace: method %s:%s[%s] found",
+                                      target.clsname.c_str(),
+                                      target.mtdname.c_str(),
+                                      target.signature.c_str());
+            targets->erase(it);
+          } else {
+            it++;
+          }
+        }
+        if (the_trace_->lazy_targets_->empty()) {
+          delete the_trace_->lazy_targets_;
+          the_trace_->lazy_targets_ = NULL;
+        }
+      }
+    }
     // App-specific fields
     {
       size_t num_fields = klass->NumInstanceFields();
