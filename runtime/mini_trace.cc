@@ -245,7 +245,7 @@ void StringAppendArgumentValues(std::string *string_p, mirror::ArtMethod *method
   }
 }
 
-static int read_with_timeout(int socket_fd, void *buf, int size, int timeout_sec) {
+static int read_with_timeout(int socket_fd, void *buf, int size, int timeout_sec = 1) {
   int total_written = 0;
   int written;
   if (timeout_sec <= 0 || timeout_sec > 10) {
@@ -421,38 +421,84 @@ void MiniTrace::Start() {
       char *methodname = new char[128];
       char *sigstring = new char[512];
       CHECK(*((int *)&kApeHandShake)  == kApeHandShake);
-      if (write(ape_socket_fd, &kApeHandShake, 4) != 4) { PLOG(ERROR) << "write handshaking value"; }
-      if (read(ape_socket_fd, &hsval, 4) != 4) { PLOG(ERROR) << "read handshaking value"; }
-      CHECK(hsval == kApeHandShake) << StringPrintf("Connect with APE: handshaking value %d", hsval);
-      if (read(ape_socket_fd, &num_funcs, 4) != 4) { PLOG(ERROR) << "read num_funcs"; }
+      int written;
+      CHECK((written = write(ape_socket_fd, &kApeHandShake, 4)) == 4)
+            << StringPrintf("MiniTrace: ConnectAPE - write handshake %d %s", written, strerror(errno));
+      CHECK((written = read_with_timeout(ape_socket_fd, &hsval, 4)) == 4)
+            << StringPrintf("MiniTrace: ConnectAPE - read handshake %d %s", written, strerror(errno));
+      CHECK(hsval == kApeHandShake)
+            << StringPrintf("Connect with APE: handshaking value %d", hsval);
+      CHECK((written = read_with_timeout(ape_socket_fd, &num_funcs, 4) == 4))
+            << StringPrintf("MiniTrace: ConnectAPE - read num_funcs %d %s", written, strerror(errno));
       ScopedObjectAccess soa(env);
       int32_t target_mask = kDoMethodEntered | kDoMethodExited | kDoMethodUnwind;
       mtd_targets = new std::map<mirror::ArtMethod*, std::pair<int, int>>();
       for (int func_id = 0; func_id < num_funcs; func_id++) {
         LOG(INFO) << "MiniTrace: func_id " << func_id;
         // read class name
-        if (read(ape_socket_fd, &string_length, 4) != 4) { PLOG(ERROR) << StringPrintf("read string_length %d", string_length); }
-        CHECK(string_length < 127);
-        if (read(ape_socket_fd, clsname, string_length) != string_length) { PLOG(ERROR) << "read clsname"; }
+        CHECK((written = read_with_timeout(ape_socket_fd, &string_length, 4)) == 4)
+              << StringPrintf("MiniTrace: ConnectAPE - read string_length %d %s ", written, strerror(errno));
+        LOG(INFO) << "MiniTrace: ConnectAPE : string_length " << string_length;
+        CHECK(0 < string_length && string_length <= 127)
+              << StringPrintf("MiniTrace: ConnectAPE - string_length %d", string_length);
+        CHECK((written = read_with_timeout(ape_socket_fd, clsname, string_length)) == string_length)
+              << StringPrintf("MiniTrace: ConnectAPE - read clsname %d %s ", written, strerror(errno));
         clsname[string_length] = 0;
+        LOG(INFO) << "MiniTrace: clsname " << clsname;
 
         // read function name
-        if (read(ape_socket_fd, &string_length, 4) != 4) { PLOG(ERROR) << StringPrintf("read string_length %d", string_length); }
-        CHECK(string_length < 127);
-        if (read(ape_socket_fd, methodname, string_length) != string_length) { PLOG(ERROR) << "read methodname"; }
+        CHECK((written = read_with_timeout(ape_socket_fd, &string_length, 4)) == 4)
+              << StringPrintf("MiniTrace: ConnectAPE - read string_length %d %s ", written, strerror(errno));
+        LOG(INFO) << "MiniTrace: ConnectAPE : string_length " << string_length;
+        CHECK(0 < string_length && string_length <= 127)
+              << StringPrintf("MiniTrace: ConnectAPE - string_length %d", string_length);
+        CHECK((written = read_with_timeout(ape_socket_fd, methodname, string_length)) == string_length)
+              << StringPrintf("MiniTrace: ConnectAPE - read methodname %d %s ", written, strerror(errno));
         methodname[string_length] = 0;
+        LOG(INFO) << "MiniTrace: methodname " << methodname;
 
         // read sigstring
-        if (read(ape_socket_fd, &string_length, 4) != 4) { PLOG(ERROR) << StringPrintf("read string_length %d", string_length); }
-        CHECK(string_length < 511);
-        if (read(ape_socket_fd, sigstring, string_length) != string_length) { PLOG(ERROR) << "read sigstring"; }
+        CHECK((written = read_with_timeout(ape_socket_fd, &string_length, 4)) == 4)
+              << StringPrintf("MiniTrace: ConnectAPE - read string_length %d %s ", written, strerror(errno));
+        LOG(INFO) << "MiniTrace: ConnectAPE : string_length " << string_length;
+        CHECK(0 < string_length && string_length <= 511)
+              << StringPrintf("MiniTrace: ConnectAPE - string_length %d", string_length);
+        CHECK((written = read_with_timeout(ape_socket_fd, sigstring, string_length)) == string_length)
+              << StringPrintf("MiniTrace: ConnectAPE - read sigstring %d %s ", written, strerror(errno));
         sigstring[string_length] = 0;
+        LOG(INFO) << "MiniTrace: sigstring " << sigstring;
 
         // read flag
         // 1: enter, 2: exit, 4:unwind
-        if (read(ape_socket_fd, &flag, 4) != 4) { PLOG(ERROR) << "read flag"; }
+        CHECK((written = read_with_timeout(ape_socket_fd, &flag, 4)) == 4)
+              << StringPrintf("MiniTrace: ConnectAPE - read flag %d %s", written, strerror(errno));
         CHECK(!(flag & ~(target_mask))); listener_flag |= flag;
-        ScopedLocalRef<jclass> cls(env, env->FindClass(clsname));
+        LOG(INFO) << "MiniTrace: flag " << flag;
+        jclass msgqclass_tmp = env->FindClass("android/os/Message");
+        jclass cls_obj = NULL;
+        if (cls_obj == NULL) {
+          // jclass randomClass;
+          jclass randomClassObject;
+          ScopedLocalRef<jclass> randomClass(env, msgqclass_tmp);
+          Runtime *runtime = Runtime::Current();
+          LOG(INFO) << "MiniTrace runtime running "  << runtime->IsStarted();
+          LOG(INFO) << "cls_obj " << cls_obj << " / randomClass " << msgqclass_tmp;
+          for (int i=0; i<300; i++) {
+            // randomClass = env->FindClass("android/os/MessageQueue");
+            int ref_cnt1 = env->locals.Capacity();
+            randomClassObject = env->GetObjectClass(msgqclass_tmp);
+            int ref_cnt2 = env->locals.Capacity();
+            LOG(INFO) << "MiniTrace: refcnt " << ref_cnt1 << "/" << ref_cnt2;
+          }
+          jclass classLoaderClass = env->FindClass("java/lang/ClassLoader");
+          jmethodID getClassLoaderMethod = env->GetMethodID(classLoaderClass, "getClassLoader", "()Ljava/lang/ClassLoader;");
+          jobject gClassLoader = env->CallObjectMethod(randomClassObject, getClassLoaderMethod);
+          jmethodID gFindClassMethod = env->GetMethodID(classLoaderClass, "findClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+          cls_obj = static_cast<jclass>(env->CallObjectMethod(gClassLoader, gFindClassMethod, env->NewStringUTF(clsname)));
+
+        }
+        CHECK(cls_obj != 0) << StringPrintf("MiniTrace: class %s not found", clsname);
+        ScopedLocalRef<jclass> cls(env, cls_obj);
 
         mirror::Class* clsp = soa.Decode<mirror::Class*>(cls.get());
         mirror::ArtMethod* method = nullptr;
@@ -469,9 +515,6 @@ void MiniTrace::Start() {
         CHECK(method != 0) << StringPrintf("MiniTrace: Method not found: %s %s %s", clsname, methodname, sigstring);
         method->SetMiniTraceTarget();
         mtd_targets->emplace(method, std::make_pair(func_id, flag));
-        LOG(INFO) << "MiniTrace: clsname " << clsname;
-        LOG(INFO) << "MiniTrace: methodname " << clsname;
-        LOG(INFO) << "MiniTrace: sigstring " << clsname;
         LOG(INFO) << "MiniTrace: method " << method;
       }
       delete sigstring;
@@ -1371,11 +1414,12 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass, const char *descriptor) {
     return;
   }
 
-  static const DexFile *apkDexFile = NULL;
+  // static const DexFile *apkDexFile = NULL;
   const DexFile& dxFile = klass->GetDexFile();
-  if (apkDexFile == NULL && (dxFile.GetLocation().rfind("/data/app/", 0) == 0))
-    apkDexFile = &dxFile;
-  CHECK((apkDexFile == NULL) || (dxFile.GetLocation().rfind("/data/app/", 0) != 0) || apkDexFile == &dxFile);
+  // if (apkDexFile == NULL && (dxFile.GetLocation().rfind("/data/app/", 0) == 0))
+  //   apkDexFile = &dxFile;
+  // CHECK((apkDexFile == NULL) || (dxFile.GetLocation().rfind("/data/app/", 0) != 0) || apkDexFile == &dxFile)
+  //       << StringPrintf("apkDexFile %s dxFile %s", apkDexFile->GetLocation().c_str(), dxFile.GetLocation().c_str());
 
   // (strncmp(descriptor, "Ljava/", 6) == 0)
   //  || (strncmp(descriptor, "Ljavax/", 7) == 0)
@@ -1389,7 +1433,8 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass, const char *descriptor) {
   //  || (strncmp(descriptor, "Landroid/", 9) == 0)
   //  || (strncmp(descriptor, "Lcom/android/", 13) == 0)
 
-  if (&dxFile == apkDexFile) {
+  // if (&dxFile == apkDexFile) {
+  if (dxFile.GetLocation().rfind("/data/app/", 0) == 0) {
     // App-specific fields
     {
       size_t num_fields = klass->NumInstanceFields();
