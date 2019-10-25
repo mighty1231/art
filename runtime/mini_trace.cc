@@ -1020,7 +1020,7 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
     auto it = mtd_targets_->find(method);
     CHECK(it != mtd_targets_->end());
     if (it->second.second & kDoMethodEntered) {
-      int *func_id = &it->second.second;
+      int *func_id = &it->second.first;
       MutexLock mu(thread, *ape_lock_);
       CHECK(write(ape_socket_fd_, &kApeTargetEntered, 4) == 4);
       CHECK(write(ape_socket_fd_, func_id, 4) == 4);
@@ -1053,7 +1053,7 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
     auto it = mtd_targets_->find(method);
     CHECK(it != mtd_targets_->end());
     if (it->second.second & kDoMethodExited) {
-      int *func_id = &it->second.second;
+      int *func_id = &it->second.first;
       MutexLock mu(thread, *ape_lock_);
       CHECK(write(ape_socket_fd_, &kApeTargetExited, 4) == 4);
       CHECK(write(ape_socket_fd_, func_id, 4) == 4);
@@ -1071,7 +1071,7 @@ void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
     auto it = mtd_targets_->find(method);
     CHECK(it != mtd_targets_->end());
     if (it->second.second & kDoMethodUnwind) {
-      int *func_id = &it->second.second;
+      int *func_id = &it->second.first;
       MutexLock mu(thread, *ape_lock_);
       CHECK(write(ape_socket_fd_, &kApeTargetUnwind, 4) == 4);
       CHECK(write(ape_socket_fd_, func_id, 4) == 4);
