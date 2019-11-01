@@ -102,6 +102,10 @@ namespace art {
  * Thread terminated event - length 6 (no action, identify this among events with tid=2)
  *   u2 tid=2;
  *   s4 tid_terminated;
+ *
+ * Target met alarm - length 6 (Enter/Exit/Unroll)
+ *   u2 tid=(3|4|5);
+ *   u4 target_id;
  */
 enum MiniTraceAction {
     kMiniTraceMethodEnter = 0x00,       // method entry
@@ -133,11 +137,12 @@ mirror::ArtMethod *MiniTrace::method_BinderProxy_getInterfaceDescriptor_ = NULL;
 mirror::ArtMethod *MiniTrace::method_InputEventReceiver_dispatchInputEvent_ = NULL;
 mirror::ArtMethod *MiniTrace::method_InputEventReceiver_finishInputEvent_ = NULL;
 
-const int MiniTrace::kApeHandShake      = 0x0abeabe0;
-const int MiniTrace::kApeTargetEntered  = 0xabeabe01;
-const int MiniTrace::kApeTargetExited   = 0xabeabe02;
-const int MiniTrace::kApeTargetUnwind   = 0xabeabe03;
-const int MiniTrace::kApeIdle           = 0xabe0de04;
+const int MiniTrace::kApeHandShake         = 0x0abeabe0;
+const int MiniTrace::kApeHandShakeNoGuide  = 0x1abeabe1;
+const int MiniTrace::kApeTargetEntered     = 0xabeabe01;
+const int MiniTrace::kApeTargetExited      = 0xabeabe02;
+const int MiniTrace::kApeTargetUnwind      = 0xabeabe03;
+const int MiniTrace::kApeIdle              = 0xabe0de04;
 
 std::vector<MiniTrace::MessageDetail *> MiniTrace::MessageDetail::messages_;
 Mutex *MiniTrace::MessageDetail::lock = NULL;
@@ -421,13 +426,12 @@ void MiniTrace::Start() {
       char *clsname = new char[128];
       char *methodname = new char[128];
       char *signature = new char[512];
-      CHECK(*((int *)&kApeHandShake)  == kApeHandShake);
       int written;
       CHECK((written = write(ape_socket_fd, &kApeHandShake, 4)) == 4)
             << StringPrintf("MiniTrace: ConnectAPE - write handshake %d %s", written, strerror(errno));
       CHECK((written = read_with_timeout(ape_socket_fd, &hsval, 4)) == 4)
             << StringPrintf("MiniTrace: ConnectAPE - read handshake %d %s", written, strerror(errno));
-      CHECK(hsval == kApeHandShake)
+      CHECK(hsval == kApeHandShake || hsval == kApeHandShakeNoGuide)
             << StringPrintf("Connect with APE: handshaking value %d", hsval);
       CHECK((written = read_with_timeout(ape_socket_fd, &num_funcs, 4) == 4))
             << StringPrintf("MiniTrace: ConnectAPE - read num_funcs %d %s", written, strerror(errno));
@@ -516,6 +520,11 @@ void MiniTrace::Start() {
         int after_refcnt = env->locals.Capacity();
         CHECK(before_refcnt == after_refcnt) << StringPrintf(
             "MiniTrace: refcnt %d -> %d", before_refcnt, after_refcnt);
+      }
+
+      // remove ape_socket_fd
+      if (hsval == kApeHandShakeNoGuide) {
+        ape_socket_fd = -1;
       }
 
       int after_refcnt0 = env->locals.Capacity();
@@ -1016,14 +1025,47 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
   // }
 
   // send APE when specific methods are met
-  if (thread == main_thread_ && method->IsMiniTraceTarget() && ape_socket_fd_ != -1) {
+  // if (method == method_InputEventReceiver_dispatchInputEvent_ && thread == main_thread_ && ape_socket_fd_ != -1) {
+  //   MutexLock mu(thread, *Locks::trace_lock_);
+  //   if (lazy_targets_ != NULL) {
+  //     LOG(ERROR) << "MiniTrace: targets are not found until next() is entered";
+  //     for (auto& target : *lazy_targets_) {
+  //       LOG(ERROR) << StringPrintf("MiniTrace:  - %s:%s[%s]",
+  //                                     target.clsname.c_str(),
+  //                                     target.mtdname.c_str(),
+  //                                     target.signature.c_str());
+  //     }
+  //     CHECK(lazy_targets_ == NULL);
+  //   }
+  // }
+
+  if (thread == main_thread_ && method->IsMiniTraceTarget()) {
     auto it = mtd_targets_->find(method);
     CHECK(it != mtd_targets_->end());
     if (it->second.second & kDoMethodEntered) {
       int *func_id = &it->second.first;
-      MutexLock mu(thread, *ape_lock_);
-      CHECK(write(ape_socket_fd_, &kApeTargetEntered, 4) == 4);
-      CHECK(write(ape_socket_fd_, func_id, 4) == 4);
+      if (ape_socket_fd_ != -1) {
+        MutexLock mu(thread, *ape_lock_);
+        CHECK(write(ape_socket_fd_, &kApeTargetEntered, 4) == 4);
+        CHECK(write(ape_socket_fd_, func_id, 4) == 4);
+        uint64_t timestamp;
+        {
+          timeval now;
+          gettimeofday(&now, NULL);
+          timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
+        }
+        CHECK(write(ape_socket_fd_, &timestamp, 8) == 8);
+      }
+
+      // write into buffer
+      char buf[6];
+      ringbuf_worker_t *ringbuf_worker = thread->GetRingBufWorker();
+      if (ringbuf_worker != NULL) {
+        /* Log target met on thread */
+        Append2LE(buf, 3);  // tid = 3
+        Append4LE(buf + 2, *func_id);
+        WriteRingBuffer(ringbuf_worker, buf, 6);
+      }
     }
   }
 }
@@ -1049,14 +1091,33 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
   }
 
   // send APE when specific methods are met
-  if (thread == main_thread_ && method->IsMiniTraceTarget() && ape_socket_fd_ != -1) {
+  if (thread == main_thread_ && method->IsMiniTraceTarget()) {
     auto it = mtd_targets_->find(method);
     CHECK(it != mtd_targets_->end());
     if (it->second.second & kDoMethodExited) {
       int *func_id = &it->second.first;
-      MutexLock mu(thread, *ape_lock_);
-      CHECK(write(ape_socket_fd_, &kApeTargetExited, 4) == 4);
-      CHECK(write(ape_socket_fd_, func_id, 4) == 4);
+      if (ape_socket_fd_ != -1) {
+        MutexLock mu(thread, *ape_lock_);
+        CHECK(write(ape_socket_fd_, &kApeTargetExited, 4) == 4);
+        CHECK(write(ape_socket_fd_, func_id, 4) == 4);
+        uint64_t timestamp;
+        {
+          timeval now;
+          gettimeofday(&now, NULL);
+          timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
+        }
+        CHECK(write(ape_socket_fd_, &timestamp, 8) == 8);
+      }
+
+      // write into buffer
+      char buf[6];
+      ringbuf_worker_t *ringbuf_worker = thread->GetRingBufWorker();
+      if (ringbuf_worker != NULL) {
+        /* Log target met on thread */
+        Append2LE(buf, 4);  // tid = 4
+        Append4LE(buf + 2, *func_id);
+        WriteRingBuffer(ringbuf_worker, buf, 6);
+      }
     }
   }
 }
@@ -1067,14 +1128,33 @@ void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
     LogMethodTraceEvent(thread, method, dex_pc, instrumentation::Instrumentation::kMethodUnwind);
 
   // send APE when specific methods are met
-  if (thread == main_thread_ && method->IsMiniTraceTarget() && ape_socket_fd_ != -1) {
+  if (thread == main_thread_ && method->IsMiniTraceTarget()) {
     auto it = mtd_targets_->find(method);
     CHECK(it != mtd_targets_->end());
     if (it->second.second & kDoMethodUnwind) {
       int *func_id = &it->second.first;
-      MutexLock mu(thread, *ape_lock_);
-      CHECK(write(ape_socket_fd_, &kApeTargetUnwind, 4) == 4);
-      CHECK(write(ape_socket_fd_, func_id, 4) == 4);
+      if (ape_socket_fd_ != -1) {
+        MutexLock mu(thread, *ape_lock_);
+        CHECK(write(ape_socket_fd_, &kApeTargetUnwind, 4) == 4);
+        CHECK(write(ape_socket_fd_, func_id, 4) == 4);
+        uint64_t timestamp;
+        {
+          timeval now;
+          gettimeofday(&now, NULL);
+          timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
+        }
+        CHECK(write(ape_socket_fd_, &timestamp, 8) == 8);
+      }
+
+      // write into buffer
+      char buf[6];
+      ringbuf_worker_t *ringbuf_worker = thread->GetRingBufWorker();
+      if (ringbuf_worker != NULL) {
+        /* Log target met on thread */
+        Append2LE(buf, 5);  // tid = 5
+        Append4LE(buf + 2, *func_id);
+        WriteRingBuffer(ringbuf_worker, buf, 6);
+      }
     }
   }
 }

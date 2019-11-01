@@ -111,6 +111,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   };
 
   static const int kApeHandShake;
+  static const int kApeHandShakeNoGuide;
   static const int kApeTargetEntered;
   static const int kApeTargetExited;
   static const int kApeTargetUnwind;
