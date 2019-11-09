@@ -433,6 +433,12 @@ void MiniTrace::Start() {
             << StringPrintf("MiniTrace: ConnectAPE - read handshake %d %s", written, strerror(errno));
       CHECK(hsval == kApeHandShake || hsval == kApeHandShakeNoGuide)
             << StringPrintf("Connect with APE: handshaking value %d", hsval);
+      // send prefix
+      string_length = strlen(prefix);
+      CHECK((written = write(ape_socket_fd, &string_length, 4)) == 4);
+      CHECK((written = write(ape_socket_fd, prefix, string_length)) == string_length);
+
+      // receive marked functions
       CHECK((written = read_with_timeout(ape_socket_fd, &num_funcs, 4) == 4))
             << StringPrintf("MiniTrace: ConnectAPE - read num_funcs %d %s", written, strerror(errno));
       ScopedObjectAccess soa(env);
