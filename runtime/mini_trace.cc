@@ -450,34 +450,31 @@ void MiniTrace::Start() {
         LOG(INFO) << "MiniTrace: func_id " << func_id;
         // read class name
         CHECK((written = read_with_timeout(ape_socket_fd, &string_length, 4)) == 4)
-              << StringPrintf("MiniTrace: ConnectAPE - read string_length %d %s ", written, strerror(errno));
-        LOG(INFO) << "MiniTrace: ConnectAPE : string_length " << string_length;
+              << StringPrintf("MiniTrace: ConnectAPE - read string_length %d %s", written, strerror(errno));
         CHECK(0 < string_length && string_length <= 127)
               << StringPrintf("MiniTrace: ConnectAPE - string_length %d", string_length);
         CHECK((written = read_with_timeout(ape_socket_fd, clsname, string_length)) == string_length)
-              << StringPrintf("MiniTrace: ConnectAPE - read clsname %d %s ", written, strerror(errno));
+              << StringPrintf("MiniTrace: ConnectAPE - read clsname %d %s", written, strerror(errno));
         clsname[string_length] = 0;
         LOG(INFO) << "MiniTrace: clsname " << clsname;
 
         // read function name
         CHECK((written = read_with_timeout(ape_socket_fd, &string_length, 4)) == 4)
-              << StringPrintf("MiniTrace: ConnectAPE - read string_length %d %s ", written, strerror(errno));
-        LOG(INFO) << "MiniTrace: ConnectAPE : string_length " << string_length;
+              << StringPrintf("MiniTrace: ConnectAPE - read string_length %d %s", written, strerror(errno));
         CHECK(0 < string_length && string_length <= 127)
               << StringPrintf("MiniTrace: ConnectAPE - string_length %d", string_length);
         CHECK((written = read_with_timeout(ape_socket_fd, methodname, string_length)) == string_length)
-              << StringPrintf("MiniTrace: ConnectAPE - read methodname %d %s ", written, strerror(errno));
+              << StringPrintf("MiniTrace: ConnectAPE - read methodname %d %s", written, strerror(errno));
         methodname[string_length] = 0;
         LOG(INFO) << "MiniTrace: methodname " << methodname;
 
         // read signature
         CHECK((written = read_with_timeout(ape_socket_fd, &string_length, 4)) == 4)
-              << StringPrintf("MiniTrace: ConnectAPE - read string_length %d %s ", written, strerror(errno));
-        LOG(INFO) << "MiniTrace: ConnectAPE : string_length " << string_length;
+              << StringPrintf("MiniTrace: ConnectAPE - read string_length %d %s", written, strerror(errno));
         CHECK(0 < string_length && string_length <= 511)
               << StringPrintf("MiniTrace: ConnectAPE - string_length %d", string_length);
         CHECK((written = read_with_timeout(ape_socket_fd, signature, string_length)) == string_length)
-              << StringPrintf("MiniTrace: ConnectAPE - read signature %d %s ", written, strerror(errno));
+              << StringPrintf("MiniTrace: ConnectAPE - read signature %d %s", written, strerror(errno));
         signature[string_length] = 0;
         LOG(INFO) << "MiniTrace: signature " << signature;
 
@@ -488,7 +485,6 @@ void MiniTrace::Start() {
         CHECK(!(flag & ~(target_mask))); listener_flag |= flag;
         LOG(INFO) << "MiniTrace: flag " << flag;
 
-        int before_refcnt = env->locals.Capacity();
         jclass target_cls = env->FindClass(clsname);
         if (target_cls == NULL) {
           // lazy
@@ -500,7 +496,7 @@ void MiniTrace::Start() {
             lazy_targets = new std::vector<lazy_target>();
           }
           lazy_targets->emplace_back(func_id, clsname, methodname, signature, flag);
-          LOG(INFO) << StringPrintf("MiniTrace: Method %s:%s[%s] would be lazily registered",
+          LOG(INFO) << StringPrintf("MiniTrace: TargetMethod %s:%s[%s] registered lazy",
               clsname, methodname, signature);
         } else {
           mirror::Class* clsp = soa.Decode<mirror::Class*>(target_cls);
@@ -516,16 +512,13 @@ void MiniTrace::Start() {
             }
           }
           env->DeleteLocalRef(target_cls);
-          CHECK(method != 0) << StringPrintf("MiniTrace: Method %s:%s[%s] not found",
+          CHECK(method != 0) << StringPrintf("MiniTrace: TargetMethod %s:%s[%s] not found",
               clsname, methodname, signature);
           method->SetMiniTraceTarget();
           mtd_targets->emplace(method, std::make_pair(func_id, flag));
-          LOG(INFO) << StringPrintf("MiniTrace: Method %s:%s[%s] registered",
+          LOG(INFO) << StringPrintf("MiniTrace: TargetMethod %s:%s[%s] registered",
               clsname, methodname, signature);
         }
-        int after_refcnt = env->locals.Capacity();
-        CHECK(before_refcnt == after_refcnt) << StringPrintf(
-            "MiniTrace: refcnt %d -> %d", before_refcnt, after_refcnt);
       }
 
       // remove ape_socket_fd
@@ -1554,13 +1547,14 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass, const char *descriptor) {
             }
 
             CHECK(method != nullptr)
-                << StringPrintf("MiniTrace: method %s[%s] not found %s",
-                                target.mtdname.c_str(), target.signature.c_str(),
-                                descriptor);
+                << StringPrintf("MiniTrace: TargetMethod %s:%s[%s] not found",
+                                target.clsname.c_str(),
+                                target.mtdname.c_str(),
+                                target.signature.c_str());
             method->SetMiniTraceTarget();
             the_trace_->mtd_targets_->emplace(method,
                                              std::make_pair(target.id, target.flag));
-            LOG(INFO) << StringPrintf("MiniTrace: method %s:%s[%s] found",
+            LOG(INFO) << StringPrintf("MiniTrace: TargetMethod %s:%s[%s] registered",
                                       target.clsname.c_str(),
                                       target.mtdname.c_str(),
                                       target.signature.c_str());
