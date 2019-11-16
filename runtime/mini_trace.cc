@@ -496,7 +496,7 @@ void MiniTrace::Start() {
             lazy_targets = new std::vector<lazy_target>();
           }
           lazy_targets->emplace_back(func_id, clsname, methodname, signature, flag);
-          LOG(INFO) << StringPrintf("MiniTrace: TargetMethod %s:%s[%s] registered lazy",
+          LOG(INFO) << StringPrintf("MiniTrace: TargetMethod %s:%s[%s] lazy",
               clsname, methodname, signature);
         } else {
           mirror::Class* clsp = soa.Decode<mirror::Class*>(target_cls);
@@ -553,7 +553,7 @@ void MiniTrace::Start() {
     timeval now;
     gettimeofday(&now, NULL);
     the_trace = the_trace_ = new MiniTrace(socket_fd, prefix, log_flag, listener_flag,
-      1024 * 1024, ape_socket_fd, now.tv_sec * 1000LL + now.tv_usec / 1000,
+      3 * 1024 * 1024, ape_socket_fd, now.tv_sec * 1000LL + now.tv_usec / 1000,
       mtd_targets, lazy_targets);
   }
 
@@ -794,6 +794,7 @@ void *MiniTrace::ConsumerTask(void *arg) {
     }
 
     the_trace->consumer_cycle_cnt_++;
+    usleep(100 * 1000); // 100 ms
   }
 
   delete databuf;
@@ -1554,7 +1555,7 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass, const char *descriptor) {
             method->SetMiniTraceTarget();
             the_trace_->mtd_targets_->emplace(method,
                                              std::make_pair(target.id, target.flag));
-            LOG(INFO) << StringPrintf("MiniTrace: TargetMethod %s:%s[%s] registered",
+            LOG(INFO) << StringPrintf("MiniTrace: TargetMethod %s:%s[%s] registered lazily",
                                       target.clsname.c_str(),
                                       target.mtdname.c_str(),
                                       target.signature.c_str());
