@@ -120,7 +120,7 @@ enum MiniTraceAction {
 };
 
 static const uint16_t kMiniTraceHeaderLength     = 4+2+2+4+8;
-static const uint16_t kMiniTraceVersion          = 3;
+static const uint16_t kMiniTraceVersion          = 4;
 static const uint32_t kMiniTraceMagic            = 0x7254694D;  // MiTr
 void *MiniTrace::nativePollOnce_originalEntry = NULL;
 int MiniTrace::MessageDetail::cur_id_ = 0;
