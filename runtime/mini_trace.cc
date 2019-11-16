@@ -1121,7 +1121,7 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
         Append4LE(buf+8, func_id);
         Append8LE(buf+12, timestamp);
         MutexLock mu(thread, *ape_lock_);
-        CHECK(write(ape_socket_fd_, buf, 20) == 20);
+        CHECK(write(ape_socket_fd_, buf, 20) == 20) << strerror(errno);
       }
 
       // write into buffer
@@ -1178,7 +1178,7 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
         Append4LE(buf+8, func_id);
         Append8LE(buf+12, timestamp);
         MutexLock mu(thread, *ape_lock_);
-        CHECK(write(ape_socket_fd_, buf, 20) == 20);
+        CHECK(write(ape_socket_fd_, buf, 20) == 20) << strerror(errno);
       }
 
       // write into buffer
@@ -1220,7 +1220,7 @@ void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
         Append4LE(buf+8, func_id);
         Append8LE(buf+12, timestamp);
         MutexLock mu(thread, *ape_lock_);
-        CHECK(write(ape_socket_fd_, buf, 20) == 20);
+        CHECK(write(ape_socket_fd_, buf, 20) == 20) << strerror(errno);
       }
 
       // write into buffer
@@ -1361,8 +1361,8 @@ void MiniTrace::ForwardMessageStatus(MessageStatusTransition transition) {
           // Send current timestamp to APE
           if (ape_socket_fd_ != -1) {
             MutexLock mu(self, *ape_lock_);
-            CHECK(write(ape_socket_fd_, &kApeIdle, 4) == 4);
-            CHECK(write(ape_socket_fd_, &timestamp, 8) == 8);
+            CHECK(write(ape_socket_fd_, &kApeIdle, 4) == 4) << strerror(errno);
+            CHECK(write(ape_socket_fd_, &timestamp, 8) == 8) << strerror(errno);
           }
         } else {
           goto run_add_idle;
