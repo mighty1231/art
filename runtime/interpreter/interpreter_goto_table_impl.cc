@@ -38,7 +38,7 @@ namespace interpreter {
     shadow_frame.SetDexPC(dex_pc);                                          \
     TraceExecution(shadow_frame, inst, dex_pc, mh);                         \
     if (UNLIKELY(execution_data != NULL)) {                                 \
-      execution_data[dex_pc] = true;                                        \
+      execution_data[dex_pc] = '1';                                         \
     }                                                                       \
     inst_data = inst->Fetch16(0);                                           \
     goto *currentHandlersTable[inst->Opcode(inst_data)];                    \
@@ -150,7 +150,7 @@ JValue ExecuteGotoImpl(Thread* self, MethodHelper& mh, const DexFile::CodeItem* 
   uint16_t inst_data;
   const void* const* currentHandlersTable;
   bool notified_method_entry_event = false;
-  bool* execution_data = NULL;
+  char* execution_data = NULL;
   UPDATE_HANDLER_TABLE();
   if (LIKELY(dex_pc == 0)) {  // We are entering the method as opposed to deoptimizing.
     if (kIsDebugBuild) {

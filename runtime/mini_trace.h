@@ -144,7 +144,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
 
   static void Checkout() LOCKS_EXCLUDED(Locks::trace_lock_);
 
-  static bool* GetExecutionData(Thread* self, mirror::ArtMethod* method)
+  static char* GetExecutionData(Thread* self, mirror::ArtMethod* method)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
       LOCKS_EXCLUDED(Locks::trace_lock_);
 
@@ -724,11 +724,12 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   volatile int consumer_cycle_cnt_;
 
   // Method Execution Data
-  SafeMap<mirror::ArtMethod*, bool*> execution_data_;
+  std::map<mirror::ArtMethod*, char*> execution_data_;
 
   Mutex *traced_method_lock_;
   Mutex *traced_field_lock_;
   Mutex *traced_thread_lock_;
+  Mutex *traced_execution_lock_;
 
   /* Used for logging messages / idlecheck task */
   Thread *main_thread_;

@@ -71,7 +71,7 @@ JValue ExecuteSwitchImpl(Thread* self, MethodHelper& mh, const DexFile::CodeItem
   uint32_t dex_pc = shadow_frame.GetDexPC();
   bool notified_method_entry_event = false;
   const instrumentation::Instrumentation* const instrumentation = Runtime::Current()->GetInstrumentation();
-  bool* execution_data = NULL;
+  char* execution_data = NULL;
   if (LIKELY(dex_pc == 0)) {  // We are entering the method as opposed to deoptimizing.
     if (kIsDebugBuild) {
         self->AssertNoPendingException();
@@ -89,7 +89,7 @@ JValue ExecuteSwitchImpl(Thread* self, MethodHelper& mh, const DexFile::CodeItem
   while (true) {
     dex_pc = inst->GetDexPc(insns);
     if (execution_data != NULL) {
-      execution_data[dex_pc] = true;
+      execution_data[dex_pc] = '1';
     }
     shadow_frame.SetDexPC(dex_pc);
     TraceExecution(shadow_frame, inst, dex_pc, mh);
