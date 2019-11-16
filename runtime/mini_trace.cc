@@ -1257,10 +1257,6 @@ void MiniTrace::ExceptionCaught(Thread* thread, const ThrowLocation& throw_locat
     WriteRingBuffer(ringbuf_worker, buf, record_size);
     delete buf;
   }
-  // Wait for a cycle on consumer
-  // @TODO use condition variable..?
-  int cycleid = consumer_cycle_cnt_;
-  while (consumer_cycle_cnt_ - cycleid <= 2) {}
 }
 
 void MiniTrace::LogMessage(Thread* thread, MessageDetail *msg_detail) {
