@@ -1107,19 +1107,21 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
     CHECK(it != mtd_targets_->end());
     if (it->second.second & kDoMethodEntered) {
       pid_t tid = thread->GetTid();
-      int *func_id = &it->second.first;
+      int func_id = it->second.first;
       if (ape_socket_fd_ != -1) {
+        char buf[20];
         uint64_t timestamp;
         {
           timeval now;
           gettimeofday(&now, NULL);
           timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
         }
+        Append4LE(buf, kApeTargetEntered);
+        Append4LE(buf+4, tid);
+        Append4LE(buf+8, func_id);
+        Append8LE(buf+12, timestamp);
         MutexLock mu(thread, *ape_lock_);
-        CHECK(write(ape_socket_fd_, &kApeTargetEntered, 4) == 4);
-        CHECK(write(ape_socket_fd_, &tid, 4) == 4);
-        CHECK(write(ape_socket_fd_, func_id, 4) == 4);
-        CHECK(write(ape_socket_fd_, &timestamp, 8) == 8);
+        CHECK(write(ape_socket_fd_, buf, 20) == 20);
       }
 
       // write into buffer
@@ -1129,7 +1131,7 @@ void MiniTrace::MethodEntered(Thread* thread, mirror::Object* this_object,
         /* Log target met on thread */
         Append2LE(buf, 3);
         Append4LE(buf + 2, tid);
-        Append4LE(buf + 6, *func_id);
+        Append4LE(buf + 6, func_id);
         WriteRingBuffer(ringbuf_worker, buf, 10);
       }
     }
@@ -1162,19 +1164,21 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
     CHECK(it != mtd_targets_->end());
     if (it->second.second & kDoMethodExited) {
       pid_t tid = thread->GetTid();
-      int *func_id = &it->second.first;
+      int func_id = it->second.first;
       if (ape_socket_fd_ != -1) {
+        char buf[20];
         uint64_t timestamp;
         {
           timeval now;
           gettimeofday(&now, NULL);
           timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
         }
+        Append4LE(buf, kApeTargetExited);
+        Append4LE(buf+4, tid);
+        Append4LE(buf+8, func_id);
+        Append8LE(buf+12, timestamp);
         MutexLock mu(thread, *ape_lock_);
-        CHECK(write(ape_socket_fd_, &kApeTargetExited, 4) == 4);
-        CHECK(write(ape_socket_fd_, &tid, 4) == 4);
-        CHECK(write(ape_socket_fd_, func_id, 4) == 4);
-        CHECK(write(ape_socket_fd_, &timestamp, 8) == 8);
+        CHECK(write(ape_socket_fd_, buf, 20) == 20);
       }
 
       // write into buffer
@@ -1184,7 +1188,7 @@ void MiniTrace::MethodExited(Thread* thread, mirror::Object* this_object,
         /* Log target met on thread */
         Append2LE(buf, 4);
         Append4LE(buf + 2, tid);
-        Append4LE(buf + 6, *func_id);
+        Append4LE(buf + 6, func_id);
         WriteRingBuffer(ringbuf_worker, buf, 10);
       }
     }
@@ -1202,19 +1206,21 @@ void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
     CHECK(it != mtd_targets_->end());
     if (it->second.second & kDoMethodUnwind) {
       pid_t tid = thread->GetTid();
-      int *func_id = &it->second.first;
+      int func_id = it->second.first;
       if (ape_socket_fd_ != -1) {
+        char buf[20];
         uint64_t timestamp;
         {
           timeval now;
           gettimeofday(&now, NULL);
           timestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
         }
+        Append4LE(buf, kApeTargetUnwind);
+        Append4LE(buf+4, tid);
+        Append4LE(buf+8, func_id);
+        Append8LE(buf+12, timestamp);
         MutexLock mu(thread, *ape_lock_);
-        CHECK(write(ape_socket_fd_, &kApeTargetUnwind, 4) == 4);
-        CHECK(write(ape_socket_fd_, &tid, 4) == 4);
-        CHECK(write(ape_socket_fd_, func_id, 4) == 4);
-        CHECK(write(ape_socket_fd_, &timestamp, 8) == 8);
+        CHECK(write(ape_socket_fd_, buf, 20) == 20);
       }
 
       // write into buffer
@@ -1224,7 +1230,7 @@ void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
         /* Log target met on thread */
         Append2LE(buf, 5);
         Append4LE(buf + 2, tid);
-        Append4LE(buf + 6, *func_id);
+        Append4LE(buf + 6, func_id);
         WriteRingBuffer(ringbuf_worker, buf, 10);
       }
     }
