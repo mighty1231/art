@@ -139,7 +139,6 @@ mirror::ArtMethod *MiniTrace::method_InputEventReceiver_dispatchInputEvent_ = NU
 mirror::ArtMethod *MiniTrace::method_InputEventReceiver_finishInputEvent_ = NULL;
 
 const int MiniTrace::kApeHandShake         = 0x0abeabe0;
-const int MiniTrace::kApeHandShakeNoGuide  = 0x1abeabe1;
 const int MiniTrace::kApeTargetEntered     = 0xabeabe01;
 const int MiniTrace::kApeTargetExited      = 0xabeabe02;
 const int MiniTrace::kApeTargetUnwind      = 0xabeabe03;
@@ -432,8 +431,7 @@ void MiniTrace::Start() {
             << StringPrintf("MiniTrace: ConnectAPE - write handshake %d %s", written, strerror(errno));
       CHECK((written = read_with_timeout(ape_socket_fd, &hsval, 4)) == 4)
             << StringPrintf("MiniTrace: ConnectAPE - read handshake %d %s", written, strerror(errno));
-      CHECK(hsval == kApeHandShake || hsval == kApeHandShakeNoGuide)
-            << StringPrintf("Connect with APE: handshaking value %d", hsval);
+      CHECK(hsval == kApeHandShake) << StringPrintf("Connect with APE: handshaking value %d", hsval);
 
       // send main thread id
       static_assert(sizeof(pid_t) == 4, "pid_t must have size 4");
@@ -526,11 +524,6 @@ void MiniTrace::Start() {
           LOG(INFO) << StringPrintf("MiniTrace: TargetMethod %s:%s[%s] registered",
               clsname, methodname, signature);
         }
-      }
-
-      // remove ape_socket_fd
-      if (hsval == kApeHandShakeNoGuide) {
-        ape_socket_fd = -1;
       }
 
       int after_refcnt0 = env->locals.Capacity();
