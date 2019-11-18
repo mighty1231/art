@@ -803,6 +803,7 @@ void *MiniTrace::ConsumerTask(void *arg) {
     }
 
     changed_methods->clear();
+    int difflog_size = 0; // 0x[0-9a-f]{8}\t(data)\n
     {
       // fetch only the difference
       MutexLock mu(self, *the_trace->traced_execution_lock_);
@@ -811,12 +812,15 @@ void *MiniTrace::ConsumerTask(void *arg) {
         char *new_data = new_item.second;
         std::map<mirror::ArtMethod*, char*>::iterator it = execution_data->find(method);
         if (it == execution_data->end()) {
-          char *data = new char[strlen(new_data)];
+          size_t sz = strlen(new_data);
+          char *data = new char[sz + 1];
           strcpy(data, new_data);
           execution_data->emplace(method, data);
           changed_methods->push_back(method);
+          difflog_size += (10 + 1 + 1) + sz;
         } else {
           if (strcmp(it->second, new_data) != 0) {
+            difflog_size += (10 + 1 + 1) + strlen(new_data);
             strcpy(it->second, new_data); 
             changed_methods->push_back(method);
           }
@@ -824,12 +828,13 @@ void *MiniTrace::ConsumerTask(void *arg) {
       }
     }
 
-    if (!changed_methods->empty()) {
-      std::string string;
+    if (difflog_size) {
+      char *ptr = new char[difflog_size + 1];
+      char *cur = ptr;
       for (auto &method: *changed_methods) {
-        string.append(StringPrintf("%p\t%s\n", method, (*execution_data)[method]));
+        cur += sprintf(cur, "%p\t%s\n", method, execution_data->at(method));
       }
-      if (!trace_execution_file_->WriteFully(string.c_str(), string.length())) {
+      if (!trace_execution_file_->WriteFully(ptr, difflog_size)) {
         std::string detail(StringPrintf("MiniTrace: Trace execution data write failed: %s", strerror(errno)));
         PLOG(ERROR) << detail;
         {
@@ -838,6 +843,7 @@ void *MiniTrace::ConsumerTask(void *arg) {
           Locks::mutator_lock_->ExclusiveUnlock(self);
         }
       }
+      delete ptr;
     }
 
     the_trace->consumer_cycle_cnt_++;
@@ -993,9 +999,10 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag,
     CHECK(method_InputEventReceiver_finishInputEvent_);
   }
 
-  for (auto &mtd_target: *mtd_targets) {
-    LogNewMethod(mtd_target.first);
-  }
+  if (mtd_targets != NULL)
+    for (auto &mtd_target: *mtd_targets) {
+      LogNewMethod(mtd_target.first);
+    }
 }
 
 void MiniTrace::DexPcMoved(Thread* thread, mirror::Object* this_object,
@@ -1536,24 +1543,25 @@ char* MiniTrace::GetExecutionData(Thread* self, mirror::ArtMethod* method) {
         && !method->IsMiniTraceTarget())
       return NULL;
 
-    std::map<mirror::ArtMethod*, char*>::iterator it = the_trace->execution_data_.find(method);
-    if (it == the_trace->execution_data_.end()) {
-      const DexFile::CodeItem *code_item = method->GetCodeItem();
-      uint16_t insns_size = code_item->insns_size_in_code_units_;
-      if (insns_size == 0) {
-        return NULL;
-      }
+    {
+      MutexLock mu(self, *the_trace->traced_execution_lock_);
 
-      char *execution_data = new char[insns_size+1];
-      memset(execution_data, '0', insns_size * sizeof(char));
-      execution_data[insns_size] = '\0';
-      {
-        MutexLock mu(self, *the_trace->traced_execution_lock_);
+      std::map<mirror::ArtMethod*, char*>::iterator it = the_trace->execution_data_.find(method);
+      if (it == the_trace->execution_data_.end()) {
+        const DexFile::CodeItem *code_item = method->GetCodeItem();
+        uint16_t insns_size = code_item->insns_size_in_code_units_;
+        if (insns_size == 0) {
+          return NULL;
+        }
+
+        char *execution_data = new char[insns_size+1];
+        memset(execution_data, '0', insns_size * sizeof(char));
+        execution_data[insns_size] = '\0';
         the_trace->execution_data_[method] = execution_data;
+        return execution_data;
       }
-      return execution_data;
+      return it->second;
     }
-    return it->second;
   }
 }
 
