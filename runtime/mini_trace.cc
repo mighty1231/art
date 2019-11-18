@@ -844,7 +844,7 @@ void *MiniTrace::ConsumerTask(void *arg) {
         for (auto &method: *changed_methods) {
           cur += sprintf(cur, "%p\t%s\n", method, execution_data->at(method));
         }
-        if (!trace_execution_file_->WriteFully(ptr, difflog_size)) {
+        if (!trace_execution_file_->WriteFully(ptr, 24 + difflog_size)) {
           std::string detail(StringPrintf("MiniTrace: Trace execution data write failed: %s", strerror(errno)));
           PLOG(ERROR) << detail;
           {
