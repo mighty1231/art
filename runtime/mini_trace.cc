@@ -703,6 +703,10 @@ void *MiniTrace::ConsumerTask(void *arg) {
 
   size_t len, woff;
   std::string buffer;
+
+  timeval now;
+  gettimeofday(&now, NULL);
+  uint64_t lastExecutionCheckTimestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
   while (the_trace->consumer_runs_) {
     // Dump Buffer
     len = ringbuf_consume(the_trace->ringbuf_, &woff);
@@ -802,48 +806,56 @@ void *MiniTrace::ConsumerTask(void *arg) {
       }
     }
 
-    changed_methods->clear();
-    int difflog_size = 0; // 0x[0-9a-f]{8}\t(data)\n
-    {
-      // fetch only the difference
-      MutexLock mu(self, *the_trace->traced_execution_lock_);
-      for (auto &new_item: the_trace->execution_data_) {
-        mirror::ArtMethod *method = new_item.first;
-        char *new_data = new_item.second;
-        std::map<mirror::ArtMethod*, char*>::iterator it = execution_data->find(method);
-        if (it == execution_data->end()) {
-          size_t sz = strlen(new_data);
-          char *data = new char[sz + 1];
-          strcpy(data, new_data);
-          execution_data->emplace(method, data);
-          changed_methods->push_back(method);
-          difflog_size += (10 + 1 + 1) + sz;
-        } else {
-          if (strcmp(it->second, new_data) != 0) {
-            difflog_size += (10 + 1 + 1) + strlen(new_data);
-            strcpy(it->second, new_data); 
+    uint64_t curTimestamp;
+    gettimeofday(&now, NULL);
+    curTimestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
+    if (curTimestamp >= lastExecutionCheckTimestamp + 1000) {
+      changed_methods->clear();
+      int difflog_size = 0; // 0x[0-9a-f]{8}\t(data)\n
+      {
+        // fetch only the difference
+        MutexLock mu(self, *the_trace->traced_execution_lock_);
+        for (auto &new_item: the_trace->execution_data_) {
+          mirror::ArtMethod *method = new_item.first;
+          char *new_data = new_item.second;
+          std::map<mirror::ArtMethod*, char*>::iterator it = execution_data->find(method);
+          if (it == execution_data->end()) {
+            size_t sz = strlen(new_data);
+            char *data = new char[sz + 1];
+            strcpy(data, new_data);
+            execution_data->emplace(method, data);
             changed_methods->push_back(method);
+            difflog_size += (10 + 1 + 1) + sz;
+          } else {
+            if (strcmp(it->second, new_data) != 0) {
+              difflog_size += (10 + 1 + 1) + strlen(new_data);
+              strcpy(it->second, new_data);
+              changed_methods->push_back(method);
+            }
           }
         }
       }
-    }
 
-    if (difflog_size) {
-      char *ptr = new char[difflog_size + 1];
-      char *cur = ptr;
-      for (auto &method: *changed_methods) {
-        cur += sprintf(cur, "%p\t%s\n", method, execution_data->at(method));
-      }
-      if (!trace_execution_file_->WriteFully(ptr, difflog_size)) {
-        std::string detail(StringPrintf("MiniTrace: Trace execution data write failed: %s", strerror(errno)));
-        PLOG(ERROR) << detail;
-        {
-          Locks::mutator_lock_->ExclusiveLock(self);
-          ThrowRuntimeException("%s", detail.c_str());
-          Locks::mutator_lock_->ExclusiveUnlock(self);
+      if (difflog_size) {
+        // Timestamp 1574047256557\n
+        char *ptr = new char[24 + difflog_size + 1];
+        char *cur = ptr;
+        cur += sprintf(cur, "Timestamp %" PRId64 "\n", curTimestamp);
+        for (auto &method: *changed_methods) {
+          cur += sprintf(cur, "%p\t%s\n", method, execution_data->at(method));
         }
+        if (!trace_execution_file_->WriteFully(ptr, difflog_size)) {
+          std::string detail(StringPrintf("MiniTrace: Trace execution data write failed: %s", strerror(errno)));
+          PLOG(ERROR) << detail;
+          {
+            Locks::mutator_lock_->ExclusiveLock(self);
+            ThrowRuntimeException("%s", detail.c_str());
+            Locks::mutator_lock_->ExclusiveUnlock(self);
+          }
+        }
+        delete ptr;
       }
-      delete ptr;
+      lastExecutionCheckTimestamp = curTimestamp;
     }
 
     the_trace->consumer_cycle_cnt_++;
