@@ -129,6 +129,7 @@ std::map<mirror::Object *, MiniTrace::MessageDetail *> MiniTrace::MessageDetail:
 mirror::ArtMethod *MiniTrace::method_msgq_next_ = NULL;
 mirror::ArtMethod *MiniTrace::method_msgq_enqueueMessage_ = NULL;
 mirror::ArtMethod *MiniTrace::method_msgq_nativePollOnce_ = NULL;
+mirror::ArtMethod *MiniTrace::method_Looper_loop_ = NULL;
 mirror::ArtMethod *MiniTrace::method_Message_recycleUnchecked_ = NULL;
 mirror::ArtMethod *MiniTrace::method_Message_toString_ = NULL;
 mirror::ArtMethod *MiniTrace::method_Binder_execTransact_ = NULL;
@@ -548,7 +549,6 @@ void MiniTrace::Start() {
     }
     if (log_flag & (kLogMessage | kConnectAPE))
       listener_flag |= (kDoMethodEntered | kDoMethodExited);
-    listener_flag |= kDoExceptionCaught;
     listener_flag &= kInstListener;
     timeval now;
     gettimeofday(&now, NULL);
@@ -567,7 +567,7 @@ void MiniTrace::Start() {
                                         the_trace),
                                         "Pinging thread");
   }
-  runtime->GetInstrumentation()->AddListener(the_trace, listener_flag);
+  runtime->GetInstrumentation()->AddListener(the_trace, listener_flag | kDoMethodUnwind);
   runtime->GetInstrumentation()->EnableMethodTracing();
   runtime->GetThreadList()->ResumeAll();
 }
@@ -601,7 +601,7 @@ void MiniTrace::Shutdown() {
 
     runtime_thread_list->SuspendAll();
     runtime->GetInstrumentation()->DisableMethodTracing();
-    runtime->GetInstrumentation()->RemoveListener(the_trace, the_trace->listener_flag_);
+    runtime->GetInstrumentation()->RemoveListener(the_trace, the_trace->listener_flag_ | kDoMethodUnwind);
 
     // Wait for consumer
     if (consumer_thread != NULL) {
@@ -1001,6 +1001,7 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag,
     CHECK(method_msgq_next_);
     CHECK(method_msgq_enqueueMessage_);
     CHECK(method_msgq_nativePollOnce_);
+    CHECK(method_Looper_loop_);
     CHECK(method_Message_recycleUnchecked_);
     CHECK(method_Message_toString_);
     CHECK(method_Binder_execTransact_);
@@ -1235,28 +1236,34 @@ void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
       WriteRingBuffer(ringbuf_worker, buf, 10);
     }
   }
+
+  // wait consuming for unwinding loop
+  if (method == method_Looper_loop_ && thread == main_thread_) {
+    int cur_cycle_cnt = consumer_cycle_cnt_;
+    while (consumer_cycle_cnt_ < cur_cycle_cnt + 2) {
+      usleep(10*1000); // 10ms
+    }
+  }
 }
 
 void MiniTrace::ExceptionCaught(Thread* thread, const ThrowLocation& throw_location,
                             mirror::ArtMethod* catch_method, uint32_t catch_dex_pc,
                             mirror::Throwable* exception_object) {
-  if (log_flag_ & kDoExceptionCaught) {
-    MiniTraceAction action = kMiniTraceExceptionCaught;
+  MiniTraceAction action = kMiniTraceExceptionCaught;
 
-    ringbuf_worker_t *ringbuf_worker = GetRingBufWorker();
-    if (ringbuf_worker == NULL)
-      return;
-    std::string content = exception_object->Dump();
-    uint16_t record_size = content.length() + 2 + 4 + 1;
-    char *buf = new char[record_size]();
+  ringbuf_worker_t *ringbuf_worker = GetRingBufWorker();
+  if (ringbuf_worker == NULL)
+    return;
+  std::string content = exception_object->Dump();
+  uint16_t record_size = content.length() + 2 + 4 + 1;
+  char *buf = new char[record_size]();
 
-    Append2LE(buf, thread->GetTid());
-    Append4LE(buf + 2, (record_size << 3) | action);
-    strcpy(buf + 6, content.c_str());
+  Append2LE(buf, thread->GetTid());
+  Append4LE(buf + 2, (record_size << 3) | action);
+  strcpy(buf + 6, content.c_str());
 
-    WriteRingBuffer(ringbuf_worker, buf, record_size);
-    delete buf;
-  }
+  WriteRingBuffer(ringbuf_worker, buf, record_size);
+  delete buf;
 }
 
 void MiniTrace::LogMessage(Thread* thread, MessageDetail *msg_detail) {
@@ -1735,6 +1742,11 @@ void MiniTrace::PostClassPrepare(mirror::Class* klass, const char *descriptor) {
     CHECK(method_msgq_next_);
     CHECK(method_msgq_enqueueMessage_);
     CHECK(method_msgq_nativePollOnce_);
+  }
+
+  if (method_Looper_loop_ == NULL && strcmp(descriptor, "Landroid/os/Looper;") == 0) {
+    method_Looper_loop_ = klass->FindDeclaredDirectMethod("loop", "()V");
+    CHECK(method_Looper_loop_);
   }
 
   if (method_Message_recycleUnchecked_ == NULL && strcmp(descriptor, "Landroid/os/Message;") == 0) {

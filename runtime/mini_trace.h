@@ -740,6 +740,7 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   static mirror::ArtMethod *method_msgq_next_;
   static mirror::ArtMethod *method_msgq_enqueueMessage_;
   static mirror::ArtMethod *method_msgq_nativePollOnce_;
+  static mirror::ArtMethod *method_Looper_loop_;
   static mirror::ArtMethod *method_Message_recycleUnchecked_;
   static mirror::ArtMethod *method_Message_toString_;
   static mirror::ArtMethod *method_Binder_execTransact_;
