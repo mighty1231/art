@@ -723,6 +723,9 @@ class MiniTrace : public instrumentation::InstrumentationListener {
   // To sync on exception synchronization
   volatile int consumer_cycle_cnt_;
 
+  // save execution data
+  volatile bool save_execution_data_;
+
   // Method Execution Data
   std::map<mirror::ArtMethod*, char*> execution_data_;
 

@@ -809,7 +809,8 @@ void *MiniTrace::ConsumerTask(void *arg) {
     uint64_t curTimestamp;
     gettimeofday(&now, NULL);
     curTimestamp = now.tv_sec * 1000LL + now.tv_usec / 1000;
-    if (curTimestamp >= lastExecutionCheckTimestamp + 1000) {
+    if (curTimestamp >= lastExecutionCheckTimestamp + 500 || the_trace->save_execution_data_) {
+      the_trace->save_execution_data_ = false;
       changed_methods->clear();
       int difflog_size = 0; // 0x[0-9a-f]{8}\t(data)\n
       {
@@ -969,7 +970,7 @@ MiniTrace::MiniTrace(int socket_fd, const char *prefix, uint32_t log_flag,
       log_flag_(log_flag), listener_flag_(listener_flag),
       do_coverage_((log_flag & kDoCoverage) != 0),
       buffer_size_(buffer_size), start_timestamp_(start_timestamp),
-      consumer_cycle_cnt_(0),
+      consumer_cycle_cnt_(0), save_execution_data_(false),
       traced_method_lock_(new Mutex("MiniTrace method lock")),
       traced_field_lock_(new Mutex("MiniTrace field lock")),
       traced_thread_lock_(new Mutex("MiniTrace thread lock")),
@@ -1239,6 +1240,7 @@ void MiniTrace::MethodUnwind(Thread* thread, mirror::Object* this_object,
 
   // wait consuming for unwinding loop
   if (method == method_Looper_loop_ && thread == main_thread_) {
+    save_execution_data_ = true;
     int cur_cycle_cnt = consumer_cycle_cnt_;
     while (consumer_cycle_cnt_ < cur_cycle_cnt + 2) {
       usleep(10*1000); // 10ms
